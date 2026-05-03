@@ -14,7 +14,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+client = None
+
+@app.on_event("startup")
+async def startup():
+    global client
+    client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
 
 class AnalyzeRequest(BaseModel):
     image_base64: str
