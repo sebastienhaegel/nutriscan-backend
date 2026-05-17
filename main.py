@@ -4,6 +4,7 @@ from pydantic import BaseModel
 import anthropic
 import os
 import json
+import traceback
 
 app = FastAPI()
 
@@ -14,13 +15,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-client = None
-
-@app.on_event("startup")
-async def startup():
-    global client
-    client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
-
 class AnalyzeRequest(BaseModel):
     image_base64: str
     age: int
@@ -30,7 +24,10 @@ class AnalyzeRequest(BaseModel):
 
 @app.post("/analyze")
 async def analyze(req: AnalyzeRequest):
-    prompt = f"""Tu es un expert en nutrition. Analyse la photo de ce repas et réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown).
+    try:
+        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        
+        prompt = f"""Tu es un expert en nutrition. Analyse la photo de ce repas et réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown).
 
 Profil : {req.gender}, {req.age} ans, {req.weight} kg, objectif: {req.goal}.
 
@@ -52,9 +49,8 @@ Retourne exactement ce format JSON :
   "conseils": ["Conseil 1", "Conseil 2", "Conseil 3"]
 }}"""
 
-    try:
         response = client.messages.create(
-            model="claude-opus-4-5",
+            model="claude-sonnet-4-20250514",
             max_tokens=1000,
             messages=[{
                 "role": "user",
@@ -71,10 +67,13 @@ Retourne exactement ce format JSON :
                 ]
             }]
         )
-        result = json.loads(response.content[0].text)
+        
+        raw = response.content[0].text
+        clean = raw.replace("```json", "").replace("```", "").strip()
+        result = json.loads(clean)
         return result
-  except Exception as e:
-        import traceback
+
+    except Exception as e:
         error_detail = traceback.format_exc()
         print(f"ERREUR DÉTAILLÉE: {error_detail}")
         raise HTTPException(status_code=500, detail=str(e))
