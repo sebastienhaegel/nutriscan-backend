@@ -73,7 +73,10 @@ Retourne exactement ce format JSON :
         )
         result = json.loads(response.content[0].text)
         return result
-    except Exception as e:
+  except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        print(f"ERREUR DÉTAILLÉE: {error_detail}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
