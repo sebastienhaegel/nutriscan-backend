@@ -77,7 +77,13 @@ Retourne exactement ce format JSON :
         error_detail = traceback.format_exc()
         print(f"ERREUR DÉTAILLÉE: {error_detail}")
         raise HTTPException(status_code=500, detail=str(e))
-
+@app.get("/check")
+def check():
+    key = os.environ.get("ANTHROPIC_API_KEY", "NON TROUVÉE")
+    return {
+        "key_found": key != "NON TROUVÉE",
+        "key_start": key[:10] if key != "NON TROUVÉE" else "NON TROUVÉE"
+    }
 @app.get("/health")
 def health():
     return {"status": "ok"}
