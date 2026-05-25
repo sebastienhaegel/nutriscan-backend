@@ -22,11 +22,14 @@ class AnalyzeRequest(BaseModel):
     weight: int
     goal: str
 
+class SuggestionsRequest(BaseModel):
+    prompt: str
+
 @app.post("/analyze")
 async def analyze(req: AnalyzeRequest):
     try:
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-        
+
         prompt = f"""Tu es un expert en nutrition. Analyse la photo de ce repas et réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown).
 
 Profil : {req.gender}, {req.age} ans, {req.weight} kg, objectif: {req.goal}.
@@ -50,7 +53,7 @@ Retourne exactement ce format JSON :
 }}"""
 
         response = client.messages.create(
-        model="claude-sonnet-4-5",
+            model="claude-sonnet-4-5",
             max_tokens=1000,
             messages=[{
                 "role": "user",
@@ -67,7 +70,7 @@ Retourne exactement ce format JSON :
                 ]
             }]
         )
-        
+
         raw = response.content[0].text
         clean = raw.replace("```json", "").replace("```", "").strip()
         result = json.loads(clean)
@@ -77,15 +80,6 @@ Retourne exactement ce format JSON :
         error_detail = traceback.format_exc()
         print(f"ERREUR DÉTAILLÉE: {error_detail}")
         raise HTTPException(status_code=500, detail=str(e))
-@app.get("/check")
-def check():
-    key = os.environ.get("ANTHROPIC_API_KEY", "NON TROUVÉE")
-    return {
-        "key_found": key != "NON TROUVÉE",
-        "key_start": key[:10] if key != "NON TROUVÉE" else "NON TROUVÉE"
-    }
-    class SuggestionsRequest(BaseModel):
-    prompt: str
 
 @app.post("/suggestions")
 async def suggestions(req: SuggestionsRequest):
@@ -101,9 +95,18 @@ async def suggestions(req: SuggestionsRequest):
         )
         return {"result": response.content[0].text}
     except Exception as e:
-        import traceback
-        print(f"ERREUR SUGGESTIONS: {traceback.format_exc()}")
+        error_detail = traceback.format_exc()
+        print(f"ERREUR SUGGESTIONS: {error_detail}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/check")
+def check():
+    key = os.environ.get("ANTHROPIC_API_KEY", "NON TROUVÉE")
+    return {
+        "key_found": key != "NON TROUVÉE",
+        "key_start": key[:10] if key != "NON TROUVÉE" else "NON TROUVÉE"
+    }
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
