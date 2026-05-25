@@ -84,6 +84,26 @@ def check():
         "key_found": key != "NON TROUVÉE",
         "key_start": key[:10] if key != "NON TROUVÉE" else "NON TROUVÉE"
     }
+    class SuggestionsRequest(BaseModel):
+    prompt: str
+
+@app.post("/suggestions")
+async def suggestions(req: SuggestionsRequest):
+    try:
+        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        response = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=1000,
+            messages=[{
+                "role": "user",
+                "content": req.prompt
+            }]
+        )
+        return {"result": response.content[0].text}
+    except Exception as e:
+        import traceback
+        print(f"ERREUR SUGGESTIONS: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
 @app.get("/health")
 def health():
     return {"status": "ok"}
