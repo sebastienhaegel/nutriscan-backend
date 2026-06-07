@@ -106,7 +106,52 @@ def check():
         "key_found": key != "NON TROUVÉE",
         "key_start": key[:10] if key != "NON TROUVÉE" else "NON TROUVÉE"
     }
+class NextMealRequest(BaseModel):
+    nom_repas: str
+    score: int
+    nutrients: list
 
+@app.post("/next-meal")
+async def next_meal(req: NextMealRequest):
+    try:
+        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        
+        nutrients_str = ", ".join([
+            f"{n['nom']} à {n['pct']}%"
+            for n in req.nutrients
+        ])
+        
+        prompt = f"""Tu es un expert en nutrition. L'utilisateur vient de manger : {req.nom_repas} (score nutritionnel: {req.score}/100).
+
+Apports de ce repas : {nutrients_str}.
+
+En fonction de ces apports, suggère UN SEUL repas idéal pour le prochain repas.
+Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
+{{
+  "nom": "Nom du repas suggéré",
+  "description": "Description courte et appétissante (1-2 phrases)",
+  "raison": "Pourquoi ce repas complète bien le précédent (1 phrase)",
+  "ingredients": ["ingrédient 1", "ingrédient 2", "ingrédient 3", "ingrédient 4"]
+}}"""
+
+        response = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=500,
+            messages=[{
+                "role": "user",
+                "content": prompt
+            }]
+        )
+        
+        raw = response.content[0].text
+        clean = raw.replace("```json", "").replace("```", "").strip()
+        result = json.loads(clean)
+        return result
+        
+    except Exception as e:
+        error_detail = traceback.format_exc()
+        print(f"ERREUR NEXT MEAL: {error_detail}")
+        raise HTTPException(status_code=500, detail=str(e))
 @app.get("/health")
 def health():
     return {"status": "ok"}
