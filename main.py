@@ -26,6 +26,19 @@ class AnalyzeRequest(BaseModel):
 class SuggestionsRequest(BaseModel):
     prompt: str
 
+class NextMealRequest(BaseModel):
+    nom_repas: str
+    score: int
+    nutrients: list
+    aliments_frigo: list[str] = []
+
+class ScanInventoryRequest(BaseModel):
+    image_base64: str
+
+class RecipeRequest(BaseModel):
+    aliments: list[str]
+
+
 @app.post("/analyze")
 async def analyze(req: AnalyzeRequest):
     try:
@@ -63,6 +76,7 @@ Retourne exactement ce format JSON :
 }}
 
 Les valeurs "calories", "proteines_g", "glucides_g", "lipides_g" doivent correspondre au poids total réel de {req.poids_plat}g, pas à 100g."""
+
         response = client.messages.create(
             model="claude-sonnet-4-5",
             max_tokens=1000,
@@ -92,6 +106,7 @@ Les valeurs "calories", "proteines_g", "glucides_g", "lipides_g" doivent corresp
         print(f"ERREUR DÉTAILLÉE: {error_detail}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post("/suggestions")
 async def suggestions(req: SuggestionsRequest):
     try:
@@ -110,18 +125,6 @@ async def suggestions(req: SuggestionsRequest):
         print(f"ERREUR SUGGESTIONS: {error_detail}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/check")
-def check():
-    key = os.environ.get("ANTHROPIC_API_KEY", "NON TROUVÉE")
-    return {
-        "key_found": key != "NON TROUVÉE",
-        "key_start": key[:10] if key != "NON TROUVÉE" else "NON TROUVÉE"
-    }
-class NextMealRequest(BaseModel):
-    nom_repas: str
-    score: int
-    nutrients: list
-    aliments_frigo: list[str] = []
 
 @app.post("/next-meal")
 async def next_meal(req: NextMealRequest):
@@ -169,11 +172,6 @@ Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
         print(f"ERREUR NEXT MEAL: {error_detail}")
         raise HTTPException(status_code=500, detail=str(e))
 
-class ScanInventoryRequest(BaseModel):
-    image_base64: str
-
-class RecipeRequest(BaseModel):
-    aliments: list[str]
 
 @app.post("/scan-inventory")
 async def scan_inventory(req: ScanInventoryRequest):
@@ -260,7 +258,7 @@ Règles importantes :
             }]
         )
 
-raw = response.content[0].text
+        raw = response.content[0].text
         clean = raw.replace("```json", "").replace("```", "").strip()
         result = json.loads(clean)
         return result
@@ -270,8 +268,16 @@ raw = response.content[0].text
         print(f"ERREUR RECIPE: {error_detail}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.get("/check")
+def check():
+    key = os.environ.get("ANTHROPIC_API_KEY", "NON TROUVÉE")
+    return {
+        "key_found": key != "NON TROUVÉE",
+        "key_start": key[:10] if key != "NON TROUVÉE" else "NON TROUVÉE"
+    }
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
-
