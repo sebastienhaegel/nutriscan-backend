@@ -21,6 +21,7 @@ class AnalyzeRequest(BaseModel):
     gender: str
     weight: int
     goal: str
+    poids_plat: int
 
 class SuggestionsRequest(BaseModel):
     prompt: str
