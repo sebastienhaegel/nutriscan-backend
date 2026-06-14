@@ -226,7 +226,7 @@ async def recipe_from_inventory(req: RecipeRequest):
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
         aliments_str = ", ".join(req.aliments)
 
-consigne_principal = ""
+        consigne_principal = ""
         if req.aliment_principal:
             consigne_principal = f"\nLa recette DOIT obligatoirement utiliser cet ingrédient comme élément principal du plat : {req.aliment_principal}.\n"
 
@@ -234,7 +234,8 @@ consigne_principal = ""
 
 {aliments_str}
 {consigne_principal}
-Propose 3 recettes SIMPLES et RAPIDES réalisables principalement avec ces ingrédients.{{
+Propose 3 recettes SIMPLES et RAPIDES réalisables principalement avec ces ingrédients. Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
+{{
   "recettes": [
     {{
       "nom": "Nom de la recette",
