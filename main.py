@@ -121,6 +121,7 @@ class NextMealRequest(BaseModel):
     nom_repas: str
     score: int
     nutrients: list
+    aliments_frigo: list[str] = []
 
 @app.post("/next-meal")
 async def next_meal(req: NextMealRequest):
