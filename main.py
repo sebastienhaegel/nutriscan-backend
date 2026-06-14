@@ -34,6 +34,9 @@ async def analyze(req: AnalyzeRequest):
         prompt = f"""Tu es un expert en nutrition. Analyse la photo de ce repas et réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown).
 
 Profil : {req.gender}, {req.age} ans, {req.weight} kg, objectif: {req.goal}.
+Poids total du plat servi sur la photo : {req.poids_plat} grammes.
+
+Estime la composition de ce plat (proportions des ingrédients visibles) et calcule les macronutriments totaux pour ce poids de {req.poids_plat}g.
 
 Retourne exactement ce format JSON :
 {{
@@ -42,6 +45,12 @@ Retourne exactement ce format JSON :
   "score": 72,
   "verdict": "Titre du bilan",
   "commentaire": "Commentaire personnalisé (2-3 phrases)",
+  "macros": {{
+    "calories": 650,
+    "proteines_g": 35,
+    "glucides_g": 70,
+    "lipides_g": 22
+  }},
   "nutrients": [
     {{ "nom": "Protéines", "pct": 65, "niveau": "medium" }},
     {{ "nom": "Glucides",  "pct": 85, "niveau": "good"   }},
@@ -51,8 +60,9 @@ Retourne exactement ce format JSON :
     {{ "nom": "Minéraux",  "pct": 55, "niveau": "medium" }}
   ],
   "conseils": ["Conseil 1", "Conseil 2", "Conseil 3"]
-}}"""
+}}
 
+Les valeurs "calories", "proteines_g", "glucides_g", "lipides_g" doivent correspondre au poids total réel de {req.poids_plat}g, pas à 100g."""
         response = client.messages.create(
             model="claude-sonnet-4-5",
             max_tokens=1000,
