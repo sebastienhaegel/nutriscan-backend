@@ -244,6 +244,7 @@ Propose 3 recettes SIMPLES et RAPIDES réalisables principalement avec ces ingr�
 
 Règles importantes :
 - Maximum 5 ingrédients au total par recette (en comptant ingredients_utilises + ingredients_manquants)
+- Chaque recette doit inclure AU MOINS 1 fruit ou 1 légume (frais, surgelé ou en conserve), même petit, parmi ingredients_utilises ou ingredients_manquants
 - Privilégie les recettes avec peu d'étapes de préparation (moins de 20 minutes)
 - Privilégie le maximum d'ingrédients déjà disponibles dans le frigo
 - Évite les techniques de cuisine complexes (pas de marinades longues, pas de cuissons multiples)
