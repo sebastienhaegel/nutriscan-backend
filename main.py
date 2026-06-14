@@ -127,13 +127,13 @@ class NextMealRequest(BaseModel):
 async def next_meal(req: NextMealRequest):
     try:
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-        
+
         nutrients_str = ", ".join([
             f"{n['nom']} à {n['pct']}%"
             for n in req.nutrients
         ])
-        
-      frigo_str = ", ".join(req.aliments_frigo) if req.aliments_frigo else "aucune donnée disponible"
+
+        frigo_str = ", ".join(req.aliments_frigo) if req.aliments_frigo else "aucune donnée disponible"
 
         prompt = f"""Tu es un expert en nutrition. L'utilisateur vient de manger : {req.nom_repas} (score nutritionnel: {req.score}/100).
 
@@ -158,12 +158,12 @@ Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
                 "content": prompt
             }]
         )
-        
+
         raw = response.content[0].text
         clean = raw.replace("```json", "").replace("```", "").strip()
         result = json.loads(clean)
         return result
-        
+
     except Exception as e:
         error_detail = traceback.format_exc()
         print(f"ERREUR NEXT MEAL: {error_detail}")
