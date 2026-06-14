@@ -163,6 +163,102 @@ Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
         error_detail = traceback.format_exc()
         print(f"ERREUR NEXT MEAL: {error_detail}")
         raise HTTPException(status_code=500, detail=str(e))
+
+class ScanInventoryRequest(BaseModel):
+    image_base64: str
+
+class RecipeRequest(BaseModel):
+    aliments: list[str]
+
+@app.post("/scan-inventory")
+async def scan_inventory(req: ScanInventoryRequest):
+    try:
+        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        prompt = """Tu es un expert en analyse alimentaire. Analyse cette photo (frigo, placard ou ticket de caisse) et identifie tous les aliments visibles ou listés.
+
+Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
+{
+  "aliments": [
+    { "nom": "Nom de l'aliment", "quantite": "ex: 2, 500g, 1L", "categorie": "Légumes" }
+  ]
+}
+
+Catégories possibles : "Légumes", "Fruits", "Viandes/Poissons", "Produits laitiers", "Féculents", "Épicerie", "Boissons", "Autre".
+Si c'est un ticket de caisse, liste les produits alimentaires achetés (ignore les articles non alimentaires)."""
+
+        response = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=1000,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": req.image_base64
+                        }
+                    },
+                    {"type": "text", "text": prompt}
+                ]
+            }]
+        )
+
+        raw = response.content[0].text
+        clean = raw.replace("```json", "").replace("```", "").strip()
+        result = json.loads(clean)
+        return result
+
+    except Exception as e:
+        error_detail = traceback.format_exc()
+        print(f"ERREUR SCAN INVENTORY: {error_detail}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/recipe-from-inventory")
+async def recipe_from_inventory(req: RecipeRequest):
+    try:
+        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        aliments_str = ", ".join(req.aliments)
+
+        prompt = f"""Tu es un chef cuisinier. Voici les aliments disponibles dans le frigo/placard :
+
+{aliments_str}
+
+Propose 3 recettes réalisables principalement avec ces ingrédients. Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
+{{
+  "recettes": [
+    {{
+      "nom": "Nom de la recette",
+      "description": "Description courte et appétissante (1-2 phrases)",
+      "temps_minutes": 25,
+      "ingredients_utilises": ["ingrédient 1", "ingrédient 2"],
+      "ingredients_manquants": ["ingrédient à acheter"]
+    }}
+  ]
+}}
+
+Privilégie les recettes qui utilisent le maximum d'ingrédients déjà disponibles."""
+
+        response = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=1200,
+            messages=[{
+                "role": "user",
+                "content": prompt
+            }]
+        )
+
+        raw = response.content[0].text
+        clean = raw.replace("```json", "").replace("```", "").strip()
+        result = json.loads(clean)
+        return result
+
+    except Exception as e:
+        error_detail = traceback.format_exc()
+        print(f"ERREUR RECIPE: {error_detail}")
+        raise HTTPException(status_code=500, detail=str(e))
 @app.get("/health")
 def health():
     return {"status": "ok"}
