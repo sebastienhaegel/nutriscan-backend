@@ -260,7 +260,18 @@ Règles importantes :
             }]
         )
 
-        raw = response.content[0].text
+raw = response.content[0].text
+        clean = raw.replace("```json", "").replace("```", "").strip()
+        result = json.loads(clean)
+        return result
+
+    except Exception as e:
+        error_detail = traceback.format_exc()
+        print(f"ERREUR RECIPE: {error_detail}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
