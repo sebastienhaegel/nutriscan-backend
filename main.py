@@ -133,11 +133,15 @@ async def next_meal(req: NextMealRequest):
             for n in req.nutrients
         ])
         
+      frigo_str = ", ".join(req.aliments_frigo) if req.aliments_frigo else "aucune donnée disponible"
+
         prompt = f"""Tu es un expert en nutrition. L'utilisateur vient de manger : {req.nom_repas} (score nutritionnel: {req.score}/100).
 
 Apports de ce repas : {nutrients_str}.
 
-En fonction de ces apports, suggère UN SEUL repas idéal pour le prochain repas.
+Aliments disponibles dans son frigo : {frigo_str}.
+
+En fonction de ces apports, suggère UN SEUL repas idéal pour le prochain repas. Si des aliments du frigo permettent de réaliser ce repas, utilise-les en priorité et mentionne-le.
 Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
 {{
   "nom": "Nom du repas suggéré",
