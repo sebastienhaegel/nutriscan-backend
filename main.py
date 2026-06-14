@@ -226,25 +226,29 @@ async def recipe_from_inventory(req: RecipeRequest):
     try:
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
         aliments_str = ", ".join(req.aliments)
-
-        prompt = f"""Tu es un chef cuisinier. Voici les aliments disponibles dans le frigo/placard :
+prompt = f"""Tu es un chef cuisinier spécialisé dans les recettes simples et rapides du quotidien. Voici les aliments disponibles dans le frigo/placard :
 
 {aliments_str}
 
-Propose 3 recettes réalisables principalement avec ces ingrédients. Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
+Propose 3 recettes SIMPLES et RAPIDES réalisables principalement avec ces ingrédients. Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
 {{
   "recettes": [
     {{
       "nom": "Nom de la recette",
       "description": "Description courte et appétissante (1-2 phrases)",
-      "temps_minutes": 25,
+      "temps_minutes": 20,
       "ingredients_utilises": ["ingrédient 1", "ingrédient 2"],
       "ingredients_manquants": ["ingrédient à acheter"]
     }}
   ]
 }}
 
-Privilégie les recettes qui utilisent le maximum d'ingrédients déjà disponibles."""
+Règles importantes :
+- Maximum 5 ingrédients au total par recette (en comptant ingredients_utilises + ingredients_manquants)
+- Privilégie les recettes avec peu d'étapes de préparation (moins de 20 minutes)
+- Privilégie le maximum d'ingrédients déjà disponibles dans le frigo
+- Évite les techniques de cuisine complexes (pas de marinades longues, pas de cuissons multiples)
+- Pense "facile pour un soir de semaine" : poêlées, gratins simples, salades composées, pâtes/riz + protéine + légume"""
 
         response = client.messages.create(
             model="claude-sonnet-4-5",
