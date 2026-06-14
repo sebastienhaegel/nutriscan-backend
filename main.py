@@ -226,7 +226,8 @@ async def recipe_from_inventory(req: RecipeRequest):
     try:
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
         aliments_str = ", ".join(req.aliments)
-prompt = f"""Tu es un chef cuisinier spécialisé dans les recettes simples et rapides du quotidien. Voici les aliments disponibles dans le frigo/placard :
+
+        prompt = f"""Tu es un chef cuisinier spécialisé dans les recettes simples et rapides du quotidien. Voici les aliments disponibles dans le frigo/placard :
 
 {aliments_str}
 
@@ -260,14 +261,6 @@ Règles importantes :
         )
 
         raw = response.content[0].text
-        clean = raw.replace("```json", "").replace("```", "").strip()
-        result = json.loads(clean)
-        return result
-
-    except Exception as e:
-        error_detail = traceback.format_exc()
-        print(f"ERREUR RECIPE: {error_detail}")
-        raise HTTPException(status_code=500, detail=str(e))
 @app.get("/health")
 def health():
     return {"status": "ok"}
