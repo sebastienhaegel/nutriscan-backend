@@ -37,6 +37,7 @@ class ScanInventoryRequest(BaseModel):
 
 class RecipeRequest(BaseModel):
     aliments: list[str]
+    aliment_principal: str | None = None
 
 
 @app.post("/analyze")
