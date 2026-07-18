@@ -22,6 +22,7 @@ class AnalyzeRequest(BaseModel):
     weight: int
     goal: str
     poids_plat: int
+    nom_plat: str | None = None
 
 class SuggestionsRequest(BaseModel):
     prompt: str
@@ -45,11 +46,15 @@ async def analyze(req: AnalyzeRequest):
     try:
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
+        indication_plat = ""
+        if req.nom_plat:
+            indication_plat = f"\nL'application a identifié ce plat comme étant : {req.nom_plat}. Utilise ce nom si tu es d'accord, sinon corrige-le.\n"
+
         prompt = f"""Tu es un expert en nutrition. Analyse la photo de ce repas et réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown).
 
 Profil : {req.gender}, {req.age} ans, {req.weight} kg, objectif: {req.goal}.
 Poids total du plat servi sur la photo : {req.poids_plat} grammes.
-
+{indication_plat}
 Estime la composition de ce plat (proportions des ingrédients visibles) et calcule les macronutriments totaux pour ce poids de {req.poids_plat}g.
 
 Retourne exactement ce format JSON :
@@ -154,7 +159,7 @@ Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
   "ingredients": ["ingrédient 1", "ingrédient 2", "ingrédient 3", "ingrédient 4"]
 }}"""
 
-response = client.messages.create(
+        response = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=500,
             messages=[{
@@ -190,7 +195,7 @@ Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
 Catégories possibles : "Légumes", "Fruits", "Viandes/Poissons", "Produits laitiers", "Féculents", "Épicerie", "Boissons", "Autre".
 Si c'est un ticket de caisse, liste les produits alimentaires achetés (ignore les articles non alimentaires)."""
 
-response = client.messages.create(
+        response = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=1000,
             messages=[{
@@ -249,10 +254,10 @@ Propose 3 recettes SIMPLES et RAPIDES réalisables principalement avec ces ingr�
 
 Règles importantes :
 - Maximum 5 ingrédients au total par recette (en comptant ingredients_utilises + ingredients_manquants)
-- Chaque recette doit inclure AU MOINS 1 fruit ou 1 légume (frais, surgelé ou en conserve), même petit, parmi ingredients_utilises ou ingredients_manquants
+- Chaque recette doit inclure AU MOINS 1 fruit ou 1 légume parmi ingredients_utilises ou ingredients_manquants
 - Privilégie les recettes avec peu d'étapes de préparation (moins de 20 minutes)
 - Privilégie le maximum d'ingrédients déjà disponibles dans le frigo
-- Évite les techniques de cuisine complexes (pas de marinades longues, pas de cuissons multiples)
+- Évite les techniques de cuisine complexes
 - Pense "facile pour un soir de semaine" : poêlées, gratins simples, salades composées, pâtes/riz + protéine + légume"""
 
         response = client.messages.create(
