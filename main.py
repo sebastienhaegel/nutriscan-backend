@@ -154,8 +154,8 @@ Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
   "ingredients": ["ingrédient 1", "ingrédient 2", "ingrédient 3", "ingrédient 4"]
 }}"""
 
-        response = client.messages.create(
-            model="claude-sonnet-4-5",
+response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
             max_tokens=500,
             messages=[{
                 "role": "user",
