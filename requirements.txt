@@ -2,3 +2,6 @@ fastapi
 uvicorn
 anthropic
 pydantic
+sqlalchemy
+psycopg2-binary
+resend
