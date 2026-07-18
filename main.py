@@ -1,10 +1,12 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import anthropic
 import os
 import json
 import traceback
+import time
+from collections import defaultdict
 
 app = FastAPI()
 
@@ -15,6 +17,33 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# MARK: — Système de quotas
+MAX_ANALYSES_PAR_JOUR = 3
+user_analyses = defaultdict(list)  # {user_id: [timestamp1, timestamp2, ...]}
+
+def verifier_quota(user_id: str) -> dict:
+    """Vérifie et met à jour le quota d'un utilisateur."""
+    now = time.time()
+    hier = now - 86400  # 24 heures en secondes
+
+    # Nettoie les appels de plus de 24h
+    user_analyses[user_id] = [t for t in user_analyses[user_id] if t > hier]
+
+    appels_aujourd_hui = len(user_analyses[user_id])
+    restants = MAX_ANALYSES_PAR_JOUR - appels_aujourd_hui
+
+    return {
+        "autorise": appels_aujourd_hui < MAX_ANALYSES_PAR_JOUR,
+        "appels_aujourd_hui": appels_aujourd_hui,
+        "restants": max(0, restants),
+        "maximum": MAX_ANALYSES_PAR_JOUR
+    }
+
+def enregistrer_appel(user_id: str):
+    """Enregistre un appel pour un utilisateur."""
+    user_analyses[user_id].append(time.time())
+
+
 class AnalyzeRequest(BaseModel):
     image_base64: str
     age: int
@@ -23,6 +52,7 @@ class AnalyzeRequest(BaseModel):
     goal: str
     poids_plat: int
     nom_plat: str | None = None
+    user_id: str = "anonymous"
 
 class SuggestionsRequest(BaseModel):
     prompt: str
@@ -44,6 +74,19 @@ class RecipeRequest(BaseModel):
 @app.post("/analyze")
 async def analyze(req: AnalyzeRequest):
     try:
+        # Vérification du quota
+        quota = verifier_quota(req.user_id)
+        if not quota["autorise"]:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "message": "Quota journalier atteint",
+                    "appels_aujourd_hui": quota["appels_aujourd_hui"],
+                    "maximum": quota["maximum"],
+                    "restants": 0
+                }
+            )
+
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
         indication_plat = ""
@@ -102,15 +145,33 @@ Les valeurs "calories", "proteines_g", "glucides_g", "lipides_g" doivent corresp
             }]
         )
 
+        # Enregistre l'appel seulement si Claude a répondu
+        enregistrer_appel(req.user_id)
+
         raw = response.content[0].text
         clean = raw.replace("```json", "").replace("```", "").strip()
         result = json.loads(clean)
+
+        # Ajoute les infos de quota dans la réponse
+        result["quota"] = {
+            "restants": MAX_ANALYSES_PAR_JOUR - len(user_analyses[req.user_id]),
+            "maximum": MAX_ANALYSES_PAR_JOUR
+        }
+
         return result
 
+    except HTTPException:
+        raise
     except Exception as e:
         error_detail = traceback.format_exc()
         print(f"ERREUR DÉTAILLÉE: {error_detail}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/quota/{user_id}")
+def get_quota(user_id: str):
+    """Vérifie le quota restant d'un utilisateur."""
+    return verifier_quota(user_id)
 
 
 @app.post("/suggestions")
@@ -253,12 +314,12 @@ Propose 3 recettes SIMPLES et RAPIDES réalisables principalement avec ces ingr�
 }}
 
 Règles importantes :
-- Maximum 5 ingrédients au total par recette (en comptant ingredients_utilises + ingredients_manquants)
-- Chaque recette doit inclure AU MOINS 1 fruit ou 1 légume parmi ingredients_utilises ou ingredients_manquants
+- Maximum 5 ingrédients au total par recette
+- Chaque recette doit inclure AU MOINS 1 fruit ou 1 légume
 - Privilégie les recettes avec peu d'étapes de préparation (moins de 20 minutes)
 - Privilégie le maximum d'ingrédients déjà disponibles dans le frigo
 - Évite les techniques de cuisine complexes
-- Pense "facile pour un soir de semaine" : poêlées, gratins simples, salades composées, pâtes/riz + protéine + légume"""
+- Pense "facile pour un soir de semaine" : poêlées, gratins simples, salades composées"""
 
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
