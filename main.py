@@ -654,8 +654,34 @@ def check():
         "key_found": key != "NON TROUVÉE",
         "database_connected": db_ok
     }
-
-
+@app.get("/test-email")
+async def test_email():
+    """Test d'envoi d'email."""
+    admin = os.environ.get("ADMIN_EMAIL", "NON CONFIGURÉ")
+    api_key = os.environ.get("RESEND_API_KEY", "NON CONFIGURÉ")
+    
+    print(f"📧 Test email vers : {admin}")
+    print(f"🔑 Clé Resend : {api_key[:10]}...")
+    
+    if not api_key or api_key == "NON CONFIGURÉ":
+        return {"error": "RESEND_API_KEY manquante"}
+    
+    if not admin or admin == "NON CONFIGURÉ":
+        return {"error": "ADMIN_EMAIL manquant"}
+    
+    try:
+        resend.api_key = api_key
+        response = resend.Emails.send({
+            "from": "onboarding@resend.dev",
+            "to": admin,
+            "subject": "Test NutriScan",
+            "html": "<h1>Test email NutriScan ✅</h1><p>Si vous recevez cet email, la configuration est correcte !</p>"
+        })
+        print(f"✅ Email envoyé : {response}")
+        return {"success": True, "response": str(response)}
+    except Exception as e:
+        print(f"❌ Erreur email : {e}")
+        return {"error": str(e)}
 @app.get("/health")
 def health():
     return {"status": "ok"}
