@@ -113,7 +113,7 @@ async def suggestions(req: SuggestionsRequest):
     try:
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
         response = client.messages.create(
-            model="claude-sonnet-4-5",
+            model="claude-haiku-4-5-20251001",
             max_tokens=1000,
             messages=[{
                 "role": "user",
