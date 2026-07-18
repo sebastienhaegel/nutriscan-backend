@@ -18,7 +18,7 @@ app.add_middleware(
 )
 
 # MARK: — Système de quotas
-MAX_ANALYSES_PAR_JOUR = 3
+MAX_ANALYSES_PAR_JOUR = 100
 user_analyses = defaultdict(list)  # {user_id: [timestamp1, timestamp2, ...]}
 
 def verifier_quota(user_id: str) -> dict:
