@@ -190,8 +190,8 @@ Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
 Catégories possibles : "Légumes", "Fruits", "Viandes/Poissons", "Produits laitiers", "Féculents", "Épicerie", "Boissons", "Autre".
 Si c'est un ticket de caisse, liste les produits alimentaires achetés (ignore les articles non alimentaires)."""
 
-        response = client.messages.create(
-            model="claude-sonnet-4-5",
+response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
             max_tokens=1000,
             messages=[{
                 "role": "user",
