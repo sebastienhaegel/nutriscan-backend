@@ -682,7 +682,7 @@ async def test_email():
     except Exception as e:
         print(f"❌ Erreur email : {e}")
         return {"error": str(e)}
-        class ScanMenuRequest(BaseModel):
+class ScanMenuRequest(BaseModel):
     image_base64: str
     semaine: str
 
