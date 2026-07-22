@@ -682,6 +682,109 @@ async def test_email():
     except Exception as e:
         print(f"❌ Erreur email : {e}")
         return {"error": str(e)}
+        class ScanMenuRequest(BaseModel):
+    image_base64: str
+    semaine: str
+
+class AnalysePlatCantineRequest(BaseModel):
+    nom_plat: str
+    type_plat: str
+
+
+@app.post("/scan-menu")
+async def scan_menu(req: ScanMenuRequest):
+    try:
+        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        prompt = f"""Tu es un expert en lecture de menus de cantine scolaire.
+Analyse cette photo de menu de cantine et extrais tous les plats par jour.
+La semaine est : {req.semaine}
+
+Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
+{{
+  "semaine": "{req.semaine}",
+  "jours": [
+    {{
+      "jour": "Lundi",
+      "date": "2024-01-15",
+      "plats": [
+        {{ "nom": "Carottes râpées", "type_plat": "entree" }},
+        {{ "nom": "Poulet rôti", "type_plat": "plat" }},
+        {{ "nom": "Haricots verts", "type_plat": "accompagnement" }},
+        {{ "nom": "Yaourt", "type_plat": "dessert" }}
+      ]
+    }}
+  ]
+}}
+
+Types possibles : "entree", "plat", "accompagnement", "dessert", "laitage", "pain"
+Inclus uniquement les jours de semaine (Lundi à Vendredi)."""
+
+        response = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=2000,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": req.image_base64
+                        }
+                    },
+                    {"type": "text", "text": prompt}
+                ]
+            }]
+        )
+
+        raw = response.content[0].text
+        clean = raw.replace("```json", "").replace("```", "").strip()
+        return json.loads(clean)
+
+    except Exception as e:
+        error_detail = traceback.format_exc()
+        print(f"ERREUR SCAN MENU: {error_detail}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/analyze-plat-cantine")
+async def analyze_plat_cantine(req: AnalysePlatCantineRequest):
+    try:
+        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        prompt = f"""Tu es un expert en nutrition scolaire.
+Estime les valeurs nutritionnelles d'une portion de cantine scolaire pour un enfant.
+Plat : {req.nom_plat}
+Type : {req.type_plat}
+
+Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
+{{
+  "nom": "{req.nom_plat}",
+  "calories": 250,
+  "proteines_g": 15,
+  "glucides_g": 30,
+  "lipides_g": 8,
+  "score": 72,
+  "verdict": "Bon apport nutritionnel",
+  "conseils": ["Conseil 1", "Conseil 2"]
+}}
+
+Base-toi sur une portion standard de cantine scolaire (portion enfant)."""
+
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=500,
+            messages=[{"role": "user", "content": prompt}]
+        )
+
+        raw = response.content[0].text
+        clean = raw.replace("```json", "").replace("```", "").strip()
+        return json.loads(clean)
+
+    except Exception as e:
+        error_detail = traceback.format_exc()
+        print(f"ERREUR ANALYSE PLAT CANTINE: {error_detail}")
+        raise HTTPException(status_code=500, detail=str(e))
 @app.get("/health")
 def health():
     return {"status": "ok"}
