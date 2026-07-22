@@ -1,7 +1,9 @@
-fastapi
-uvicorn
-anthropic
-pydantic
-sqlalchemy
-psycopg2-binary
-resend
+fastapi==0.104.1
+uvicorn==0.24.0
+sqlalchemy==2.0.23
+psycopg2-binary==2.9.9
+python-multipart==0.0.6
+python-dotenv==1.0.0
+
+# Pour Create ML (optionnel si on simule)
+# turicreate==6.4.1
