@@ -3,7 +3,7 @@ Endpoints pour contribuer des données au système d'apprentissage centralisé
 Railway Backend - NutriScan Centralized Learning
 """
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 import uuid
@@ -64,7 +64,7 @@ async def contribute_photo(
     label: str = Form(...),
     user_id: str = Form(...),
     confidence: float = Form(0.9),
-    db: Session = dependency(get_db)
+    db: Session = Depends(get_db)
 ):
     """
     Contribuer une photo et son label au système d'apprentissage centralisé
@@ -155,7 +155,7 @@ async def contribute_photo(
 # ============================================
 
 @router.get("/stats")
-async def get_stats(db: Session = dependency(get_db)):
+async def get_stats(db: Session = Depends(get_db)):
     """
     Récupère statistiques du système d'apprentissage
     """
@@ -190,7 +190,7 @@ async def get_stats(db: Session = dependency(get_db)):
 # ============================================
 
 @router.get("/latest_model")
-async def get_latest_model(db: Session = dependency(get_db)):
+async def get_latest_model(db: Session = Depends(get_db)):
     """
     Retourne le dernier modèle Core ML prêt
     """
@@ -231,7 +231,7 @@ async def get_latest_model(db: Session = dependency(get_db)):
 # ============================================
 
 @router.get("/user/{user_id}/history")
-async def get_user_history(user_id: str, db: Session = dependency(get_db)):
+async def get_user_history(user_id: str, db: Session = Depends(get_db)):
     """
     Récupère historique des contributions d'un utilisateur
     """
