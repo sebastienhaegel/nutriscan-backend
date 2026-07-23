@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Modèle SQLAlchemy pour les contributions
 from database import Base, get_db, engine
-from sqlalchemy import Column, String, Float, DateTime, Integer, LargeBinary
+from sqlalchemy import Column, String, Float, DateTime, Integer, LargeBinary, Boolean
 import json
 
 class ContributionData(Base):
