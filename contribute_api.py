@@ -21,6 +21,24 @@ class ContributionModel(Base):
 # Créer les tables
 Base.metadata.create_all(bind=engine)
 
+# 🔥 FONCTION DE RÉENTRAÎNEMENT
+async def trigger_retraining(label: str, total_photos: int):
+    """Déclenche le réentraînement quand seuil atteint"""
+    try:
+        print(f"\n🔄 RÉENTRAÎNEMENT DÉCLENCHÉ!")
+        print(f"📊 Label: {label}")
+        print(f"📸 Nombre de photos: {total_photos}")
+        print(f"⚙️ Seuil atteint: {total_photos % 20 == 0}")
+        
+        # TODO: Implémenter Turi Create ou TensorFlow ici
+        # Pour l'instant, juste simuler
+        
+        print(f"✅ Réentraînement simulé complété pour '{label}'!")
+        print(f"💡 Prochaine étape: Intégrer Turi Create ou TensorFlow\n")
+        
+    except Exception as e:
+        print(f"❌ Erreur réentraînement: {e}")
+
 @router.post("/contribute")
 async def contribute_photo(
     photo_base64: str = Form(...),
@@ -38,6 +56,7 @@ async def contribute_photo(
         except:
             photo_bytes = b""
         
+        # Sauvegarder la contribution
         contribution = ContributionModel(
             user_id=user_id,
             label=label,
@@ -49,11 +68,17 @@ async def contribute_photo(
         db.commit()
         db.refresh(contribution)
         
+        # Compter les photos pour ce label
         total_for_label = db.query(func.count(ContributionModel.id)).filter(
             ContributionModel.label == label
         ).scalar()
         
+        # Vérifier si seuil atteint (20 photos)
         retraining_triggered = (total_for_label % 20 == 0) and (total_for_label > 0)
+        
+        # 🔥 DÉCLENCHER LE RÉENTRAÎNEMENT SI SEUIL ATTEINT
+        if retraining_triggered:
+            await trigger_retraining(label, total_for_label)
         
         return {
             "status": "success",
@@ -65,6 +90,32 @@ async def contribute_photo(
         
     except Exception as e:
         db.rollback()
+        return {"status": "error", "message": str(e)}
+
+# 🔥 ENDPOINT POUR RÉENTRAÎNEMENT MANUEL
+@router.post("/retrain/{label}")
+async def manual_retrain(label: str, db: Session = Depends(get_db)):
+    """Déclenche manuellement le réentraînement pour un label"""
+    try:
+        photos = db.query(ContributionModel).filter(
+            ContributionModel.label == label
+        ).all()
+        
+        if len(photos) < 5:
+            return {
+                "status": "error",
+                "message": f"Pas assez de photos ({len(photos)} < 5)"
+            }
+        
+        # Déclencher le réentraînement
+        await trigger_retraining(label, len(photos))
+        
+        return {
+            "status": "success",
+            "message": f"Réentraînement lancé pour '{label}'",
+            "photos_used": len(photos)
+        }
+    except Exception as e:
         return {"status": "error", "message": str(e)}
 
 @router.get("/stats")
