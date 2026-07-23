@@ -8,5 +8,4 @@ slowapi==0.1.8
 anthropic>=0.30.0
 resend==2.34.0
 tensorflow==2.20.0
-coremltools==7.1
 Pillow==10.0.0
