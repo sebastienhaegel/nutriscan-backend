@@ -14,9 +14,17 @@ import uuid
 import resend
 from collections import defaultdict
 from datetime import datetime
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 from contribute_api import router as learning_router
 app.include_router(learning_router)
-app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
