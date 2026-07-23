@@ -17,7 +17,7 @@ router = APIRouter(prefix="/api/learning", tags=["learning"])
 logger = logging.getLogger(__name__)
 
 # Modèle SQLAlchemy pour les contributions
-from main import Base, get_db, engine
+from database import Base, get_db, engine
 from sqlalchemy import Column, String, Float, DateTime, Integer, LargeBinary
 import json
 
