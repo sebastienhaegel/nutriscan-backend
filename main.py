@@ -244,7 +244,7 @@ def chercher_plat_partage(nom: str):
         for plat in plats:
             mots_plat = mots_significatifs(plat.nom)
             intersection = mots_plat.intersection(mots_recherche)
-            union = max(len(mots_plat), len(mots_recherche))
+            union = min(len(mots_plat), len(mots_recherche))
             if union > 0 and len(intersection) / union >= 0.6:
                 plat.nombre_utilisations += 1
                 session.commit()
@@ -273,7 +273,7 @@ def sauvegarder_plat_partage(result: dict):
         plat_existant = None
         for p in plats:
             inter = mots(p.nom).intersection(mots_nom)
-            uni = max(len(mots(p.nom)), len(mots_nom))
+            uni = min(len(mots(p.nom)), len(mots_nom))
             if uni > 0 and len(inter) / uni >= 0.6:
                 plat_existant = p
                 break
@@ -314,6 +314,79 @@ def sauvegarder_plat_partage(result: dict):
         session.close()
 
 
+# MARK: — Parsing robuste des réponses Claude
+def parser_json_claude(response, defaut=None, contexte=""):
+    """Extrait un JSON d'une réponse Claude, même tronquée ou entourée de markdown.
+
+    Renvoie `defaut` (ou {}) si rien d'exploitable n'est trouvé.
+    """
+    defaut = {} if defaut is None else defaut
+
+    try:
+        raw = response.content[0].text
+    except Exception:
+        print(f"[{contexte}] ❌ Réponse vide")
+        return defaut
+
+    tronque = getattr(response, "stop_reason", None) == "max_tokens"
+    if tronque:
+        print(f"[{contexte}] ⚠️ Réponse tronquée par max_tokens ({len(raw)} chars)")
+
+    clean = raw.replace("```json", "").replace("```", "").strip()
+
+    # Guillemets typographiques éventuels
+    clean = clean.replace("\u201c", '"').replace("\u201d", '"')
+
+    # Objet {...} ou tableau [...] : on prend ce qui commence en premier
+    debut_obj = clean.find("{")
+    debut_arr = clean.find("[")
+    if debut_obj == -1 and debut_arr == -1:
+        print(f"[{contexte}] ❌ Aucun JSON détecté")
+        return defaut
+
+    if debut_arr != -1 and (debut_obj == -1 or debut_arr < debut_obj):
+        ouvrant, fermant = "[", "]"
+        debut = debut_arr
+    else:
+        ouvrant, fermant = "{", "}"
+        debut = debut_obj
+
+    clean = clean[debut:]
+    fin = clean.rfind(fermant)
+    if fin != -1:
+        clean = clean[:fin + 1]
+
+    try:
+        return json.loads(clean)
+    except json.JSONDecodeError as e:
+        print(f"[{contexte}] ⚠️ Parse échoué ({e}) — réparation…")
+
+    # Réparation 1 : virgules traînantes
+    try:
+        return json.loads(re.sub(r",(\s*[}\]])", r"\1", clean))
+    except json.JSONDecodeError:
+        pass
+
+    # Réparation 2 : ne garder que les objets complets (cas de troncature)
+    objets = re.findall(r"\{[^{}]*\}", clean)
+    if objets:
+        try:
+            liste = json.loads("[" + ",".join(objets) + "]")
+            print(f"[{contexte}] ✅ Réparé : {len(objets)} objet(s) récupéré(s)")
+            if ouvrant == "[":
+                return liste
+            # On tente de replacer la liste sous sa clé d'origine
+            cle = re.search(r'"(\w+)"\s*:\s*\[', clean)
+            if cle:
+                return {cle.group(1): liste}
+            return liste
+        except json.JSONDecodeError:
+            pass
+
+    print(f"[{contexte}] ❌ Réparation impossible")
+    return defaut
+
+
 # MARK: — Endpoints
 @app.get("/")
 def root():
@@ -340,11 +413,11 @@ Poids total du plat servi sur la photo : {req.poids_plat} grammes.
 Retourne exactement ce format JSON :
 {{"nom": "Nom du plat identifié", "description": "Description courte (1-2 phrases)", "score": 72, "verdict": "Titre du bilan", "commentaire": "Commentaire personnalisé (2-3 phrases)", "macros": {{"calories": 650, "proteines_g": 35, "glucides_g": 70, "lipides_g": 22}}, "nutrients": [{{"nom": "Protéines", "pct": 65, "niveau": "medium"}}, {{"nom": "Glucides", "pct": 85, "niveau": "good"}}, {{"nom": "Lipides", "pct": 45, "niveau": "low"}}, {{"nom": "Fibres", "pct": 30, "niveau": "low"}}, {{"nom": "Vitamines", "pct": 70, "niveau": "medium"}}, {{"nom": "Minéraux", "pct": 55, "niveau": "medium"}}], "conseils": ["Conseil 1", "Conseil 2", "Conseil 3"]}}
 Les valeurs macros doivent correspondre au poids total de {req.poids_plat}g."""
-        response = client.messages.create(model="claude-sonnet-4-5", max_tokens=1000, messages=[{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": req.image_base64}}, {"type": "text", "text": prompt}]}])
+        response = client.messages.create(model="claude-sonnet-4-5", max_tokens=2000, messages=[{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": req.image_base64}}, {"type": "text", "text": prompt}]}])
         enregistrer_appel(req.user_id)
-        raw = response.content[0].text
-        clean = raw.replace("```json", "").replace("```", "").strip()
-        result = json.loads(clean)
+        result = parser_json_claude(response, defaut={}, contexte="analyze")
+        if not result:
+            raise HTTPException(status_code=502, detail="Réponse IA illisible, réessayez")
         result = normaliser_resultat(result)   # ✅ force les entiers pour Swift
         sauvegarder_plat_partage(result)
         result["quota"] = {"restants": MAX_ANALYSES_PAR_JOUR - len(user_analyses[req.user_id]), "maximum": MAX_ANALYSES_PAR_JOUR}
@@ -458,7 +531,7 @@ async def rejeter_correction(correction_id: str):
 async def suggestions(req: SuggestionsRequest):
     try:
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-        response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=1000, messages=[{"role": "user", "content": req.prompt}])
+        response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=2000, messages=[{"role": "user", "content": req.prompt}])
         return {"result": response.content[0].text}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -474,10 +547,8 @@ Apports : {nutrients_str}.
 Aliments disponibles : {frigo_str}.
 Suggère UN SEUL repas idéal. Réponds UNIQUEMENT en JSON :
 {{"nom": "Nom du repas", "description": "Description (1-2 phrases)", "raison": "Pourquoi ce repas complète le précédent", "ingredients": ["ingrédient 1", "ingrédient 2", "ingrédient 3"]}}"""
-        response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=500, messages=[{"role": "user", "content": prompt}])
-        raw = response.content[0].text
-        clean = raw.replace("```json", "").replace("```", "").strip()
-        return json.loads(clean)
+        response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=1024, messages=[{"role": "user", "content": prompt}])
+        return parser_json_claude(response, defaut={}, contexte="next-meal")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -489,10 +560,8 @@ async def scan_inventory(req: ScanInventoryRequest):
 Réponds UNIQUEMENT en JSON :
 {"aliments": [{ "nom": "Nom", "quantite": "500g", "categorie": "Légumes" }]}
 Catégories : "Légumes", "Fruits", "Viandes/Poissons", "Produits laitiers", "Féculents", "Épicerie", "Boissons", "Autre"."""
-        response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=1000, messages=[{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": req.image_base64}}, {"type": "text", "text": prompt}]}])
-        raw = response.content[0].text
-        clean = raw.replace("```json", "").replace("```", "").strip()
-        return json.loads(clean)
+        response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=2000, messages=[{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": req.image_base64}}, {"type": "text", "text": prompt}]}])
+        return parser_json_claude(response, defaut={"aliments": []}, contexte="scan-inventory")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -507,10 +576,8 @@ async def recipe_from_inventory(req: RecipeRequest):
 Propose 3 recettes SIMPLES en JSON :
 {{"recettes": [{{"nom": "Nom", "description": "Description", "temps_minutes": 20, "ingredients_utilises": ["ing1"], "ingredients_manquants": ["ing2"]}}]}}
 Règles : max 5 ingrédients, au moins 1 légume/fruit, moins de 20 minutes."""
-        response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=1200, messages=[{"role": "user", "content": prompt}])
-        raw = response.content[0].text
-        clean = raw.replace("```json", "").replace("```", "").strip()
-        return json.loads(clean)
+        response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=2048, messages=[{"role": "user", "content": prompt}])
+        return parser_json_claude(response, defaut={"recettes": []}, contexte="recipe")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -526,9 +593,7 @@ Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
 Types possibles : "entree", "plat", "accompagnement", "dessert", "laitage", "pain"
 Inclus uniquement les jours de semaine (Lundi à Vendredi)."""
         response = client.messages.create(model="claude-sonnet-4-5", max_tokens=2000, messages=[{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": req.image_base64}}, {"type": "text", "text": prompt}]}])
-        raw = response.content[0].text
-        clean = raw.replace("```json", "").replace("```", "").strip()
-        return json.loads(clean)
+        return parser_json_claude(response, defaut={"semaine": req.semaine, "jours": []}, contexte="scan-menu")
     except Exception as e:
         error_detail = traceback.format_exc()
         print(f"ERREUR SCAN MENU: {error_detail}")
@@ -545,10 +610,8 @@ Type : {req.type_plat}
 Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
 {{"nom": "{req.nom_plat}", "calories": 250, "proteines_g": 15, "glucides_g": 30, "lipides_g": 8, "score": 72, "verdict": "Bon apport nutritionnel", "conseils": ["Conseil 1", "Conseil 2"]}}
 Base-toi sur une portion standard de cantine scolaire (portion enfant)."""
-        response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=500, messages=[{"role": "user", "content": prompt}])
-        raw = response.content[0].text
-        clean = raw.replace("```json", "").replace("```", "").strip()
-        return json.loads(clean)
+        response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=1024, messages=[{"role": "user", "content": prompt}])
+        return parser_json_claude(response, defaut={}, contexte="plat-cantine")
     except Exception as e:
         error_detail = traceback.format_exc()
         print(f"ERREUR ANALYSE PLAT CANTINE: {error_detail}")
@@ -661,3 +724,4 @@ async def test_email():
         return {"success": True, "response": str(response)}
     except Exception as e:
         return {"error": str(e)}
+
