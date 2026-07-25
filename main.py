@@ -768,7 +768,6 @@ async def scan_receipt(req: ScanReceiptRequest):
         
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
         
-        # ✅ Prompt très strict pour forcer le JSON
         prompt = req.prompt if req.prompt else """Tu es un expert en lecture de tickets de caisse.
 Analyse ce texte et extrais UNIQUEMENT les aliments avec quantités.
 
@@ -793,43 +792,42 @@ Catégories possibles: Legumes, Fruits, Viandes, Poissons, Produits laitiers, Bo
         print(f"📄 Réponse brute de Claude ({len(raw)} chars):")
         print(f"   {raw[:300]}...")
         
-        # ✅ EXTRACTION ROBUSTE DU JSON
-        # Étape 1: Supprimer les backticks markdown
+        # ✅ ÉTAPE 1: Supprimer les backticks
         clean = raw.replace("```json", "").replace("```", "").strip()
         
-        # Étape 2: Extraire le JSON avec regex (capture tout entre { et })
+        # ✅ ÉTAPE 2: Extraire le JSON
         json_match = re.search(r'\{.*\}', clean, re.DOTALL)
         if json_match:
             clean = json_match.group(0)
             print(f"✅ JSON extrait par regex: {len(clean)} chars")
         else:
-            print(f"⚠️ Pas de JSON trouvé dans la réponse")
+            print(f"⚠️ Pas de JSON trouvé")
             clean = '{"aliments": []}'
         
-        print(f"📄 JSON à parser: {clean[:300]}...")
+        # ✅ ÉTAPE 3: Nettoyer les caractères spéciaux AVANT de parser
+        print(f"⚙️ Nettoyage des caractères spéciaux...")
         
-        # Étape 3: Parser avec gestion d'erreur
+        # Remplacer & par et
+        clean = re.sub(r'"([^"]*&[^"]*)"', lambda m: f'"{m.group(1).replace("&", "et")}"', clean)
+        clean = clean.replace("'", "")
+        
+        print(f"📄 JSON après nettoyage: {clean[:300]}...")
+        
+        # ✅ ÉTAPE 4: Parser le JSON
         data = None
         try:
             data = json.loads(clean)
             print(f"✅ JSON parsé avec succès")
         except json.JSONDecodeError as e:
             print(f"❌ Erreur JSON: {e}")
-            print(f"⚠️ Tentative de nettoyage agressif...")
-            
-            # Nettoyer les caractères problématiques
-            clean_fixed = clean.encode('utf-8', 'ignore').decode('utf-8')
-            clean_fixed = re.sub(r',\s*}', '}', clean_fixed)  # Supprimer les virgules traînantes
-            clean_fixed = re.sub(r',\s*]', ']', clean_fixed)
-            
             try:
-                data = json.loads(clean_fixed)
-                print(f"✅ JSON parsé après nettoyage")
+                clean_alt = re.sub(r',(\s*[}\]])', r'\1', clean)
+                data = json.loads(clean_alt)
+                print(f"✅ JSON parsé après correction")
             except:
-                print(f"❌ Impossible de parser, retour vide")
+                print(f"❌ Impossible de parser")
                 data = {"aliments": []}
         
-        # Étape 4: Valider les données
         aliments = data.get("aliments", []) if isinstance(data, dict) else []
         
         result = {
@@ -853,7 +851,6 @@ Catégories possibles: Legumes, Fruits, Viandes, Poissons, Produits laitiers, Bo
     except Exception as e:
         error_detail = traceback.format_exc()
         print(f"❌ ERREUR SCAN RECEIPT: {error_detail}")
-        # Retourner un résultat vide au lieu de crasher
         return {"aliments": []}
 
 
