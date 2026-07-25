@@ -510,12 +510,14 @@ async def scan_receipt(req: ScanReceiptRequest):
         
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=1024,
+            max_tokens=4096,  # ✅ 1024 était trop court : le JSON était tronqué
             messages=[{"role": "user", "content": prompt}]
         )
         
         raw = response.content[0].text
-        print(f"📄 Réponse brute: {len(raw)} chars")
+        print(f"📄 Réponse brute: {len(raw)} chars (stop: {response.stop_reason})")
+        if response.stop_reason == "max_tokens":
+            print("⚠️ Réponse tronquée par max_tokens — réparation nécessaire")
         
         # Remove markdown
         clean = raw.replace("```json", "").replace("```", "").strip()
@@ -527,20 +529,35 @@ async def scan_receipt(req: ScanReceiptRequest):
         clean = clean.replace("&", "and")
         clean = clean.replace("'", "")
         
-        # Extract JUST the array [...]
-        match = re.search(r'\[.*\]', clean, re.DOTALL)
-        if not match:
-            print("❌ No array found")
+        # Extract the array [...] — même si le ] final manque (troncature)
+        start = clean.find("[")
+        if start == -1:
+            print("❌ Aucun tableau trouvé")
             return {"aliments": []}
         
-        clean = match.group(0)
-        print(f"✅ Array extracted: {len(clean)} chars")
+        clean = clean[start:]
+        end = clean.rfind("]")
+        if end != -1:
+            clean = clean[:end + 1]
+        print(f"✅ Tableau extrait: {len(clean)} chars")
         
         # Parse as array
+        aliments = None
         try:
             aliments = json.loads(clean)
         except Exception as e:
-            print(f"❌ Array parse failed: {e}")
+            print(f"⚠️ Parse échoué ({e}) — tentative de réparation…")
+            # ✅ RÉPARATION : garder uniquement les objets {...} complets
+            objets = re.findall(r'\{[^{}]*\}', clean)
+            if objets:
+                repare = "[" + ",".join(objets) + "]"
+                try:
+                    aliments = json.loads(repare)
+                    print(f"✅ Réparé : {len(objets)} objets complets récupérés")
+                except Exception as e2:
+                    print(f"❌ Réparation échouée : {e2}")
+        
+        if aliments is None:
             return {"aliments": []}
         
         # Ensure it's a list
