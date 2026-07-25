@@ -173,6 +173,59 @@ class ScanReceiptRequest(BaseModel):
     prompt: str
 
 
+# MARK: — Normalisation numérique
+def _to_int(valeur, defaut=0):
+    """Convertit n'importe quoi en int : 72.5 -> 72, "650" -> 650, None -> defaut."""
+    try:
+        if valeur is None:
+            return defaut
+        if isinstance(valeur, bool):
+            return defaut
+        if isinstance(valeur, (int, float)):
+            return int(round(float(valeur)))
+        texte = str(valeur).strip().replace(",", ".")
+        texte = re.sub(r"[^0-9.\-]", "", texte)
+        return int(round(float(texte))) if texte not in ("", "-", ".") else defaut
+    except Exception:
+        return defaut
+
+
+def normaliser_resultat(result: dict) -> dict:
+    """Garantit que tous les champs numériques sont des entiers (Swift attend des Int)."""
+    if not isinstance(result, dict):
+        return result
+
+    result["score"] = _to_int(result.get("score"))
+    result["nom"] = str(result.get("nom", "")).strip()
+    result["description"] = str(result.get("description", "")).strip()
+    result["verdict"] = str(result.get("verdict", "")).strip()
+    result["commentaire"] = str(result.get("commentaire", "")).strip()
+
+    macros = result.get("macros") or {}
+    result["macros"] = {
+        "calories": _to_int(macros.get("calories")),
+        "proteines_g": _to_int(macros.get("proteines_g")),
+        "glucides_g": _to_int(macros.get("glucides_g")),
+        "lipides_g": _to_int(macros.get("lipides_g")),
+    }
+
+    nutrients = result.get("nutrients") or []
+    result["nutrients"] = [
+        {
+            "nom": str(n.get("nom", "")).strip(),
+            "pct": _to_int(n.get("pct")),
+            "niveau": str(n.get("niveau", "medium")).strip(),
+        }
+        for n in nutrients
+        if isinstance(n, dict)
+    ]
+
+    conseils = result.get("conseils") or []
+    result["conseils"] = [str(c).strip() for c in conseils if str(c).strip()]
+
+    return result
+
+
 # MARK: — Helpers base partagée
 def chercher_plat_partage(nom: str):
     if not engine:
@@ -292,6 +345,7 @@ Les valeurs macros doivent correspondre au poids total de {req.poids_plat}g."""
         raw = response.content[0].text
         clean = raw.replace("```json", "").replace("```", "").strip()
         result = json.loads(clean)
+        result = normaliser_resultat(result)   # ✅ force les entiers pour Swift
         sauvegarder_plat_partage(result)
         result["quota"] = {"restants": MAX_ANALYSES_PAR_JOUR - len(user_analyses[req.user_id]), "maximum": MAX_ANALYSES_PAR_JOUR}
         return result
