@@ -794,6 +794,52 @@ Base-toi sur une portion standard de cantine scolaire (portion enfant)."""
         error_detail = traceback.format_exc()
         print(f"ERREUR ANALYSE PLAT CANTINE: {error_detail}")
         raise HTTPException(status_code=500, detail=str(e))
+        # MARK: — Scanner ticket de caisse (PDF)
+class ScanReceiptRequest(BaseModel):
+    prompt: str
+
+@app.post("/scan-receipt")
+async def scan_receipt(req: ScanReceiptRequest):
+    """Analyse un ticket de caisse via Claude"""
+    try:
+        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            messages=[{
+                "role": "user",
+                "content": req.prompt
+            }]
+        )
+        
+        raw = response.content[0].text
+        clean = raw.replace("```json", "").replace("```", "").strip()
+        
+        print(f"📄 Ticket analysé: {clean[:100]}...")
+        
+        # Parse la réponse JSON
+        data = json.loads(clean)
+        aliments = data.get("aliments", [])
+        
+        # Valide le format
+        result = {
+            "aliments": [
+                {
+                    "nom": item.get("nom", "Produit"),
+                    "quantite": item.get("quantite", "variable"),
+                    "categorie": item.get("categorie", "Autres")
+                }
+                for item in aliments
+            ]
+        }
+        
+        return result
+        
+    except Exception as e:
+        error_detail = traceback.format_exc()
+        print(f"❌ ERREUR SCAN RECEIPT: {error_detail}")
+        raise HTTPException(status_code=500, detail=str(e))
 @app.get("/health")
 def health():
     return {"status": "ok"}
