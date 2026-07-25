@@ -10,14 +10,11 @@ import numpy as np
 from PIL import Image
 import io
 
-# TensorFlow et Core ML
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers
-try:
-    import coremltools as ct
-except ImportError:
-    ct = None
+# ❌ NE PAS IMPORTER AU DÉMARRAGE - trop lourd!
+# import tensorflow as tf
+# from tensorflow import keras
+# from tensorflow.keras import layers
+# import coremltools as ct
 
 router = APIRouter(prefix="/api/learning", tags=["learning"])
 
@@ -48,6 +45,15 @@ Base.metadata.create_all(bind=engine)
 async def trigger_retraining(label: str, total_photos: int, db: Session):
     """Entraîne un modèle Core ML avec TensorFlow"""
     try:
+        # ✅ IMPORTER SEULEMENT QUAND APPELÉ
+        import tensorflow as tf
+        from tensorflow import keras
+        from tensorflow.keras import layers
+        try:
+            import coremltools as ct
+        except ImportError:
+            ct = None
+        
         print(f"\n{'='*60}")
         print(f"🔄 RÉENTRAÎNEMENT RÉEL AVEC TENSORFLOW")
         print(f"{'='*60}")
