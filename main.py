@@ -811,7 +811,6 @@ Catégories possibles: Legumes, Fruits, Viandes, Poissons, Produits laitiers, Bo
         clean = clean.replace("&", "et")
         clean = clean.replace("'", "")
         print(f"✅ Caractères & remplacés par 'et'")
-        
         print(f"📄 JSON après nettoyage: {clean[:300]}...")
         
         # ✅ ÉTAPE 4: Parser le JSON
