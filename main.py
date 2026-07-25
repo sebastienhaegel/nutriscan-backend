@@ -14,6 +14,7 @@ import uuid
 import resend
 from collections import defaultdict
 from datetime import datetime
+import re
 
 app = FastAPI()
 
@@ -23,10 +24,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Décommenter si contribute_api existe et fonctionne
-# from contribute_api import router as learning_router
-# app.include_router(learning_router)
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 if DATABASE_URL.startswith("postgres://"):
@@ -271,94 +268,33 @@ def root():
 
 @app.get("/health")
 def health():
-    return {
-        "status": "healthy",
-        "service": "nutriscan",
-        "version": "1.0.0"
-    }
+    return {"status": "healthy", "service": "nutriscan", "version": "1.0.0"}
 
 @app.post("/analyze")
 async def analyze(req: AnalyzeRequest):
     try:
         quota = verifier_quota(req.user_id)
         if not quota["autorise"]:
-            raise HTTPException(status_code=429, detail={
-                "message": "Quota journalier atteint",
-                "restants": 0,
-                "maximum": quota["maximum"]
-            })
-
+            raise HTTPException(status_code=429, detail={"message": "Quota journalier atteint", "restants": 0, "maximum": quota["maximum"]})
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-
         indication_plat = ""
         if req.nom_plat:
             indication_plat = f"\nL'application a identifié ce plat comme étant : {req.nom_plat}. Utilise ce nom si tu es d'accord, sinon corrige-le.\n"
-
         prompt = f"""Tu es un expert en nutrition. Analyse la photo de ce repas et réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown).
-
 Profil : {req.gender}, {req.age} ans, {req.weight} kg, objectif: {req.goal}.
 Poids total du plat servi sur la photo : {req.poids_plat} grammes.
 {indication_plat}
 Retourne exactement ce format JSON :
-{{
-  "nom": "Nom du plat identifié",
-  "description": "Description courte (1-2 phrases)",
-  "score": 72,
-  "verdict": "Titre du bilan",
-  "commentaire": "Commentaire personnalisé (2-3 phrases)",
-  "macros": {{
-    "calories": 650,
-    "proteines_g": 35,
-    "glucides_g": 70,
-    "lipides_g": 22
-  }},
-  "nutrients": [
-    {{ "nom": "Protéines", "pct": 65, "niveau": "medium" }},
-    {{ "nom": "Glucides",  "pct": 85, "niveau": "good"   }},
-    {{ "nom": "Lipides",   "pct": 45, "niveau": "low"    }},
-    {{ "nom": "Fibres",    "pct": 30, "niveau": "low"    }},
-    {{ "nom": "Vitamines", "pct": 70, "niveau": "medium" }},
-    {{ "nom": "Minéraux",  "pct": 55, "niveau": "medium" }}
-  ],
-  "conseils": ["Conseil 1", "Conseil 2", "Conseil 3"]
-}}
-
+{{"nom": "Nom du plat identifié", "description": "Description courte (1-2 phrases)", "score": 72, "verdict": "Titre du bilan", "commentaire": "Commentaire personnalisé (2-3 phrases)", "macros": {{"calories": 650, "proteines_g": 35, "glucides_g": 70, "lipides_g": 22}}, "nutrients": [{{"nom": "Protéines", "pct": 65, "niveau": "medium"}}, {{"nom": "Glucides", "pct": 85, "niveau": "good"}}, {{"nom": "Lipides", "pct": 45, "niveau": "low"}}, {{"nom": "Fibres", "pct": 30, "niveau": "low"}}, {{"nom": "Vitamines", "pct": 70, "niveau": "medium"}}, {{"nom": "Minéraux", "pct": 55, "niveau": "medium"}}], "conseils": ["Conseil 1", "Conseil 2", "Conseil 3"]}}
 Les valeurs macros doivent correspondre au poids total de {req.poids_plat}g."""
-
-        response = client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=1000,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/jpeg",
-                            "data": req.image_base64
-                        }
-                    },
-                    {"type": "text", "text": prompt}
-                ]
-            }]
-        )
-
+        response = client.messages.create(model="claude-sonnet-4-5", max_tokens=1000, messages=[{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": req.image_base64}}, {"type": "text", "text": prompt}]}])
         enregistrer_appel(req.user_id)
-
         raw = response.content[0].text
         clean = raw.replace("```json", "").replace("```", "").strip()
         result = json.loads(clean)
-
         sauvegarder_plat_partage(result)
-
-        result["quota"] = {
-            "restants": MAX_ANALYSES_PAR_JOUR - len(user_analyses[req.user_id]),
-            "maximum": MAX_ANALYSES_PAR_JOUR
-        }
-
+        result["quota"] = {"restants": MAX_ANALYSES_PAR_JOUR - len(user_analyses[req.user_id]), "maximum": MAX_ANALYSES_PAR_JOUR}
         return result
-
     except HTTPException:
         raise
     except Exception as e:
@@ -366,14 +302,11 @@ Les valeurs macros doivent correspondre au poids total de {req.poids_plat}g."""
         print(f"ERREUR DÉTAILLÉE: {error_detail}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.get("/plat/{nom}")
 async def get_plat(nom: str):
-    """Cherche un plat dans la base partagée."""
     plat = chercher_plat_partage(nom)
     if not plat:
         raise HTTPException(status_code=404, detail="Plat non trouvé")
-    
     return {
         "nom": plat.nom,
         "calories": plat.calories,
@@ -386,112 +319,54 @@ async def get_plat(nom: str):
         "nutrients": json.loads(plat.nutrients) if plat.nutrients else [],
         "conseils": json.loads(plat.conseils) if plat.conseils else [],
         "description": "Plat reconnu depuis la base partagée",
-        "macros": {
-            "calories": plat.calories,
-            "proteines_g": plat.proteines_g,
-            "glucides_g": plat.glucides_g,
-            "lipides_g": plat.lipides_g
-        }
+        "macros": {"calories": plat.calories, "proteines_g": plat.proteines_g, "glucides_g": plat.glucides_g, "lipides_g": plat.lipides_g}
     }
-
 
 @app.post("/correction")
 async def soumettre_correction(req: CorrectionRequest):
-    """Soumet une correction utilisateur."""
     if not engine:
         raise HTTPException(status_code=503, detail="Base de données non disponible")
-
     session = Session()
     try:
         plat = chercher_plat_partage(req.nom_original)
         plat_id = plat.id if plat else None
-
-        correction = CorrectionPending(
-            id=str(uuid.uuid4()),
-            plat_id=plat_id,
-            nom_original=req.nom_original,
-            nom_corrige=req.nom_corrige,
-            calories_corrige=req.calories,
-            proteines_corrige=req.proteines_g,
-            glucides_corrige=req.glucides_g,
-            lipides_corrige=req.lipides_g,
-            user_id=req.user_id,
-            statut="pending"
-        )
+        correction = CorrectionPending(id=str(uuid.uuid4()), plat_id=plat_id, nom_original=req.nom_original, nom_corrige=req.nom_corrige, calories_corrige=req.calories, proteines_corrige=req.proteines_g, glucides_corrige=req.glucides_g, lipides_corrige=req.lipides_g, user_id=req.user_id, statut="pending")
         session.add(correction)
         session.commit()
-
-        envoyer_email_correction(
-            correction.id,
-            req.nom_original,
-            req.nom_corrige,
-            req.user_id
-        )
-
-        return {
-            "success": True,
-            "correction_id": correction.id,
-            "message": "Correction soumise avec succès, merci !"
-        }
+        envoyer_email_correction(correction.id, req.nom_original, req.nom_corrige, req.user_id)
+        return {"success": True, "correction_id": correction.id, "message": "Correction soumise avec succès, merci !"}
     except Exception as e:
         session.rollback()
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         session.close()
 
-
 @app.get("/correction/{user_id}/{nom_original}")
 async def get_correction_utilisateur(user_id: str, nom_original: str):
-    """Récupère la correction en attente d'un utilisateur pour un plat."""
     if not engine:
         return {"correction": None}
-    
     session = Session()
     try:
-        correction = session.query(CorrectionPending).filter(
-            CorrectionPending.user_id == user_id,
-            CorrectionPending.nom_original == nom_original,
-            CorrectionPending.statut == "pending"
-        ).first()
-        
+        correction = session.query(CorrectionPending).filter(CorrectionPending.user_id == user_id, CorrectionPending.nom_original == nom_original, CorrectionPending.statut == "pending").first()
         if not correction:
             return {"correction": None}
-        
-        return {
-            "correction": {
-                "nom_corrige": correction.nom_corrige,
-                "calories": correction.calories_corrige,
-                "proteines_g": correction.proteines_corrige,
-                "glucides_g": correction.glucides_corrige,
-                "lipides_g": correction.lipides_corrige
-            }
-        }
+        return {"correction": {"nom_corrige": correction.nom_corrige, "calories": correction.calories_corrige, "proteines_g": correction.proteines_corrige, "glucides_g": correction.glucides_corrige, "lipides_g": correction.lipides_corrige}}
     finally:
         session.close()
 
-
 @app.get("/admin/valider/{correction_id}", response_class=HTMLResponse)
 async def valider_correction(correction_id: str):
-    """Valide une correction depuis l'email admin."""
     if not engine:
         return HTMLResponse("<h1>Base de données non disponible</h1>")
-    
     session = Session()
     try:
-        correction = session.query(CorrectionPending).filter(
-            CorrectionPending.id == correction_id
-        ).first()
-        
+        correction = session.query(CorrectionPending).filter(CorrectionPending.id == correction_id).first()
         if not correction:
             return HTMLResponse("<h1>❌ Correction introuvable</h1>")
-        
         if correction.statut != "pending":
             return HTMLResponse(f"<h1>ℹ️ Correction déjà traitée ({correction.statut})</h1>")
-        
         if correction.plat_id:
-            plat = session.query(PlatPartage).filter(
-                PlatPartage.id == correction.plat_id
-            ).first()
+            plat = session.query(PlatPartage).filter(PlatPartage.id == correction.plat_id).first()
             if plat:
                 plat.nom = correction.nom_corrige
                 plat.calories = correction.calories_corrige
@@ -499,76 +374,40 @@ async def valider_correction(correction_id: str):
                 plat.glucides_g = correction.glucides_corrige
                 plat.lipides_g = correction.lipides_corrige
         else:
-            nouveau = PlatPartage(
-                id=str(uuid.uuid4()),
-                nom=correction.nom_corrige,
-                calories=correction.calories_corrige,
-                proteines_g=correction.proteines_corrige,
-                glucides_g=correction.glucides_corrige,
-                lipides_g=correction.lipides_corrige,
-                score=0,
-                valide=True
-            )
+            nouveau = PlatPartage(id=str(uuid.uuid4()), nom=correction.nom_corrige, calories=correction.calories_corrige, proteines_g=correction.proteines_corrige, glucides_g=correction.glucides_corrige, lipides_g=correction.lipides_corrige, score=0, valide=True)
             session.add(nouveau)
-        
         correction.statut = "validee"
         session.commit()
-        
-        return HTMLResponse(f"""
-        <html><body style="font-family:sans-serif;padding:40px;text-align:center">
-            <h1>✅ Correction validée !</h1>
-            <p>Le plat <strong>{correction.nom_corrige}</strong> a été mis à jour dans la base partagée.</p>
-            <p style="color:gray">Tous les utilisateurs bénéficieront de cette correction.</p>
-        </body></html>
-        """)
+        return HTMLResponse(f"""<html><body style="font-family:sans-serif;padding:40px;text-align:center"><h1>✅ Correction validée !</h1><p>Le plat <strong>{correction.nom_corrige}</strong> a été mis à jour dans la base partagée.</p><p style="color:gray">Tous les utilisateurs bénéficieront de cette correction.</p></body></html>""")
     except Exception as e:
         session.rollback()
         return HTMLResponse(f"<h1>❌ Erreur : {str(e)}</h1>")
     finally:
         session.close()
 
-
 @app.get("/admin/rejeter/{correction_id}", response_class=HTMLResponse)
 async def rejeter_correction(correction_id: str):
-    """Rejette une correction depuis l'email admin."""
     if not engine:
         return HTMLResponse("<h1>Base de données non disponible</h1>")
-    
     session = Session()
     try:
-        correction = session.query(CorrectionPending).filter(
-            CorrectionPending.id == correction_id
-        ).first()
-        
+        correction = session.query(CorrectionPending).filter(CorrectionPending.id == correction_id).first()
         if not correction:
             return HTMLResponse("<h1>❌ Correction introuvable</h1>")
-        
         correction.statut = "rejetee"
         session.commit()
-        
-        return HTMLResponse(f"""
-        <html><body style="font-family:sans-serif;padding:40px;text-align:center">
-            <h1>❌ Correction rejetée</h1>
-            <p>La correction pour <strong>{correction.nom_original}</strong> a été rejetée.</p>
-        </body></html>
-        """)
+        return HTMLResponse(f"""<html><body style="font-family:sans-serif;padding:40px;text-align:center"><h1>❌ Correction rejetée</h1><p>La correction pour <strong>{correction.nom_original}</strong> a été rejetée.</p></body></html>""")
     finally:
         session.close()
-
 
 @app.post("/suggestions")
 async def suggestions(req: SuggestionsRequest):
     try:
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1000,
-            messages=[{"role": "user", "content": req.prompt}]
-        )
+        response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=1000, messages=[{"role": "user", "content": req.prompt}])
         return {"result": response.content[0].text}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/next-meal")
 async def next_meal(req: NextMealRequest):
@@ -576,29 +415,17 @@ async def next_meal(req: NextMealRequest):
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
         nutrients_str = ", ".join([f"{n['nom']} à {n['pct']}%" for n in req.nutrients])
         frigo_str = ", ".join(req.aliments_frigo) if req.aliments_frigo else "aucune donnée disponible"
-
         prompt = f"""Tu es un expert en nutrition. L'utilisateur vient de manger : {req.nom_repas} (score: {req.score}/100).
 Apports : {nutrients_str}.
 Aliments disponibles : {frigo_str}.
 Suggère UN SEUL repas idéal. Réponds UNIQUEMENT en JSON :
-{{
-  "nom": "Nom du repas",
-  "description": "Description (1-2 phrases)",
-  "raison": "Pourquoi ce repas complète le précédent",
-  "ingredients": ["ingrédient 1", "ingrédient 2", "ingrédient 3"]
-}}"""
-
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=500,
-            messages=[{"role": "user", "content": prompt}]
-        )
+{{"nom": "Nom du repas", "description": "Description (1-2 phrases)", "raison": "Pourquoi ce repas complète le précédent", "ingredients": ["ingrédient 1", "ingrédient 2", "ingrédient 3"]}}"""
+        response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=500, messages=[{"role": "user", "content": prompt}])
         raw = response.content[0].text
         clean = raw.replace("```json", "").replace("```", "").strip()
         return json.loads(clean)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/scan-inventory")
 async def scan_inventory(req: ScanInventoryRequest):
@@ -606,30 +433,14 @@ async def scan_inventory(req: ScanInventoryRequest):
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
         prompt = """Analyse cette photo et identifie tous les aliments visibles.
 Réponds UNIQUEMENT en JSON :
-{
-  "aliments": [
-    { "nom": "Nom", "quantite": "500g", "categorie": "Légumes" }
-  ]
-}
+{"aliments": [{ "nom": "Nom", "quantite": "500g", "categorie": "Légumes" }]}
 Catégories : "Légumes", "Fruits", "Viandes/Poissons", "Produits laitiers", "Féculents", "Épicerie", "Boissons", "Autre"."""
-
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1000,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": req.image_base64}},
-                    {"type": "text", "text": prompt}
-                ]
-            }]
-        )
+        response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=1000, messages=[{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": req.image_base64}}, {"type": "text", "text": prompt}]}])
         raw = response.content[0].text
         clean = raw.replace("```json", "").replace("```", "").strip()
         return json.loads(clean)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/recipe-from-inventory")
 async def recipe_from_inventory(req: RecipeRequest):
@@ -637,32 +448,17 @@ async def recipe_from_inventory(req: RecipeRequest):
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
         aliments_str = ", ".join(req.aliments)
         consigne = f"\nUtilise obligatoirement : {req.aliment_principal}.\n" if req.aliment_principal else ""
-
         prompt = f"""Chef cuisinier spécialisé recettes simples. Aliments disponibles : {aliments_str}
 {consigne}
 Propose 3 recettes SIMPLES en JSON :
-{{
-  "recettes": [{{
-    "nom": "Nom",
-    "description": "Description",
-    "temps_minutes": 20,
-    "ingredients_utilises": ["ing1"],
-    "ingredients_manquants": ["ing2"]
-  }}]
-}}
+{{"recettes": [{{"nom": "Nom", "description": "Description", "temps_minutes": 20, "ingredients_utilises": ["ing1"], "ingredients_manquants": ["ing2"]}}]}}
 Règles : max 5 ingrédients, au moins 1 légume/fruit, moins de 20 minutes."""
-
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1200,
-            messages=[{"role": "user", "content": prompt}]
-        )
+        response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=1200, messages=[{"role": "user", "content": prompt}])
         raw = response.content[0].text
         clean = raw.replace("```json", "").replace("```", "").strip()
         return json.loads(clean)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/scan-menu")
 async def scan_menu(req: ScanMenuRequest):
@@ -671,55 +467,18 @@ async def scan_menu(req: ScanMenuRequest):
         prompt = f"""Tu es un expert en lecture de menus de cantine scolaire.
 Analyse cette photo de menu de cantine et extrais tous les plats par jour.
 La semaine est : {req.semaine}
-
 Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
-{{
-  "semaine": "{req.semaine}",
-  "jours": [
-    {{
-      "jour": "Lundi",
-      "date": "2024-01-15",
-      "plats": [
-        {{ "nom": "Carottes râpées", "type_plat": "entree" }},
-        {{ "nom": "Poulet rôti", "type_plat": "plat" }},
-        {{ "nom": "Haricots verts", "type_plat": "accompagnement" }},
-        {{ "nom": "Yaourt", "type_plat": "dessert" }}
-      ]
-    }}
-  ]
-}}
-
+{{"semaine": "{req.semaine}", "jours": [{{"jour": "Lundi", "date": "2024-01-15", "plats": [{{"nom": "Carottes râpées", "type_plat": "entree"}}, {{"nom": "Poulet rôti", "type_plat": "plat"}}, {{"nom": "Haricots verts", "type_plat": "accompagnement"}}, {{"nom": "Yaourt", "type_plat": "dessert"}}]}}]}}
 Types possibles : "entree", "plat", "accompagnement", "dessert", "laitage", "pain"
 Inclus uniquement les jours de semaine (Lundi à Vendredi)."""
-
-        response = client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=2000,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/jpeg",
-                            "data": req.image_base64
-                        }
-                    },
-                    {"type": "text", "text": prompt}
-                ]
-            }]
-        )
-
+        response = client.messages.create(model="claude-sonnet-4-5", max_tokens=2000, messages=[{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": req.image_base64}}, {"type": "text", "text": prompt}]}])
         raw = response.content[0].text
         clean = raw.replace("```json", "").replace("```", "").strip()
         return json.loads(clean)
-
     except Exception as e:
         error_detail = traceback.format_exc()
         print(f"ERREUR SCAN MENU: {error_detail}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/analyze-plat-cantine")
 async def analyze_plat_cantine(req: AnalysePlatCantineRequest):
@@ -729,171 +488,104 @@ async def analyze_plat_cantine(req: AnalysePlatCantineRequest):
 Estime les valeurs nutritionnelles d'une portion de cantine scolaire pour un enfant.
 Plat : {req.nom_plat}
 Type : {req.type_plat}
-
 Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
-{{
-  "nom": "{req.nom_plat}",
-  "calories": 250,
-  "proteines_g": 15,
-  "glucides_g": 30,
-  "lipides_g": 8,
-  "score": 72,
-  "verdict": "Bon apport nutritionnel",
-  "conseils": ["Conseil 1", "Conseil 2"]
-}}
-
+{{"nom": "{req.nom_plat}", "calories": 250, "proteines_g": 15, "glucides_g": 30, "lipides_g": 8, "score": 72, "verdict": "Bon apport nutritionnel", "conseils": ["Conseil 1", "Conseil 2"]}}
 Base-toi sur une portion standard de cantine scolaire (portion enfant)."""
-
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=500,
-            messages=[{"role": "user", "content": prompt}]
-        )
-
+        response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=500, messages=[{"role": "user", "content": prompt}])
         raw = response.content[0].text
         clean = raw.replace("```json", "").replace("```", "").strip()
         return json.loads(clean)
-
     except Exception as e:
         error_detail = traceback.format_exc()
         print(f"ERREUR ANALYSE PLAT CANTINE: {error_detail}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.post("/scan-receipt")
 async def scan_receipt(req: ScanReceiptRequest):
     """Analyse un ticket de caisse via Claude"""
     try:
-        import re
-        
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-        
-        prompt = req.prompt if req.prompt else """Tu es un expert en lecture de tickets de caisse.
-Analyse ce texte et extrais UNIQUEMENT les aliments avec quantités.
-
-RETOURNE UNIQUEMENT UN JSON VALIDE, SANS BACKTICKS, SANS TEXTE.
-PAS DE MARKDOWN, PAS D'EXPLICATIONS.
-
-JSON FORMAT:
-{"aliments": [{"nom": "Produit", "quantite": "100g", "categorie": "Legumes"}]}
-
-Catégories possibles: Legumes, Fruits, Viandes, Poissons, Produits laitiers, Boissons, Epicerie, Autres"""
-        
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1024,
-            messages=[{
-                "role": "user",
-                "content": prompt
-            }]
-        )
-        
+        prompt = req.prompt if req.prompt else """Analyse ce ticket de caisse et retourne UNIQUEMENT du JSON valide:
+{"aliments": [{"nom": "Produit", "quantite": "100g", "categorie": "Legumes"}]}"""
+        response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=1024, messages=[{"role": "user", "content": prompt}])
         raw = response.content[0].text
-        print(f"📄 Réponse brute de Claude ({len(raw)} chars):")
-        print(f"   {raw[:300]}...")
+        print(f"📄 Réponse brute: {len(raw)} chars")
         
-        # ✅ ÉTAPE 1: Supprimer les backticks
+        # Remove markdown
         clean = raw.replace("```json", "").replace("```", "").strip()
         
-        # ✅ ÉTAPE 2: Extraire le JSON
-        json_match = re.search(r'\{.*\}', clean, re.DOTALL)
-        if json_match:
-            clean = json_match.group(0)
-            print(f"✅ JSON extrait par regex: {len(clean)} chars")
-        else:
-            print(f"⚠️ Pas de JSON trouvé")
-            clean = '{"aliments": []}'
+        # Extract JSON
+        match = re.search(r'\{.*\}', clean, re.DOTALL)
+        if not match:
+            print("❌ No JSON found")
+            return {"aliments": []}
+        clean = match.group(0)
         
-        # ✅ ÉTAPE 3: Nettoyer les caractères spéciaux AVANT de parser
-        print(f"⚙️ Nettoyage des caractères spéciaux...")
-
-        # Remplacer & directement (plus simple que regex)
-        clean = clean.replace("&", "et")
+        # ✅ FIX: Aggressive Unicode sanitization
+        print(f"⚙️ Sanitizing Unicode...")
+        
+        # Replace smart quotes
+        clean = clean.replace(""", '"').replace(""", '"')
+        clean = clean.replace("'", "'").replace("'", "'")
+        
+        # Replace & and &amp;
+        clean = clean.replace("&amp;", "and")
+        clean = clean.replace("&", "and")
+        
+        # Remove dangerous chars
         clean = clean.replace("'", "")
-        print(f"✅ Caractères & remplacés par 'et'")
-        print(f"📄 JSON après nettoyage: {clean[:300]}...")
+        clean = clean.replace("\x00", "")
+        clean = clean.replace("\r", "")
         
-        # ✅ ÉTAPE 4: Parser le JSON
-        data = None
+        # Fix common encoding issues
+        clean = re.sub(r'[\x80-\x9F]', '', clean)  # Remove control chars
+        
+        print(f"✅ Unicode cleaned")
+        
+        # Parse JSON
         try:
             data = json.loads(clean)
-            print(f"✅ JSON parsé avec succès")
-        except json.JSONDecodeError as e:
-            print(f"❌ Erreur JSON: {e}")
-            try:
-                clean_alt = re.sub(r',(\s*[}\]])', r'\1', clean)
-                data = json.loads(clean_alt)
-                print(f"✅ JSON parsé après correction")
-            except:
-                print(f"❌ Impossible de parser")
-                data = {"aliments": []}
+        except:
+            print(f"❌ JSON parse failed")
+            return {"aliments": []}
         
-        aliments = data.get("aliments", []) if isinstance(data, dict) else []
-        
+        aliments = data.get("aliments", [])
         result = {
             "aliments": [
-                {
-                    "nom": str(item.get("nom", "Produit")).strip(),
-                    "quantite": str(item.get("quantite", "variable")).strip(),
-                    "categorie": str(item.get("categorie", "Autres")).strip()
-                }
+                {"nom": str(item.get("nom", "")).strip(), "quantite": str(item.get("quantite", "")).strip(), "categorie": str(item.get("categorie", "")).strip()}
                 for item in aliments
-                if isinstance(item, dict) and item.get("nom") and str(item.get("nom")).strip()
+                if item.get("nom")
             ]
         }
         
-        print(f"✅ Résultat final: {len(result['aliments'])} aliments trouvés")
-        for item in result['aliments']:
-            print(f"   - {item['nom']} ({item['quantite']}) [{item['categorie']}]")
-        
+        print(f"✅ Result: {len(result['aliments'])} items")
         return result
         
     except Exception as e:
-        error_detail = traceback.format_exc()
-        print(f"❌ ERREUR SCAN RECEIPT: {error_detail}")
+        print(f"❌ ERROR: {e}")
         return {"aliments": []}
-
 
 @app.get("/quota/{user_id}")
 def get_quota(user_id: str):
     return verifier_quota(user_id)
 
-
 @app.get("/check")
 def check():
     key = os.environ.get("ANTHROPIC_API_KEY", "NON TROUVÉE")
     db_ok = engine is not None
-    return {
-        "key_found": key != "NON TROUVÉE",
-        "database_connected": db_ok
-    }
-
+    return {"key_found": key != "NON TROUVÉE", "database_connected": db_ok}
 
 @app.get("/test-email")
 async def test_email():
-    """Test d'envoi d'email."""
     admin = os.environ.get("ADMIN_EMAIL", "NON CONFIGURÉ")
     api_key = os.environ.get("RESEND_API_KEY", "NON CONFIGURÉ")
-    
-    print(f"📧 Test email vers : {admin}")
-    print(f"🔑 Clé Resend : {api_key[:10] if api_key != 'NON CONFIGURÉ' else 'NON TROUVÉE'}...")
-    
     if not api_key or api_key == "NON CONFIGURÉ":
         return {"error": "RESEND_API_KEY manquante"}
-    
     if not admin or admin == "NON CONFIGURÉ":
         return {"error": "ADMIN_EMAIL manquant"}
-    
     try:
         resend.api_key = api_key
-        response = resend.Emails.send({
-            "from": "onboarding@resend.dev",
-            "to": admin,
-            "subject": "Test NutriScan",
-            "html": "<h1>Test email NutriScan ✅</h1><p>Si vous recevez cet email, la configuration est correcte !</p>"
-        })
-        print(f"✅ Email envoyé : {response}")
+        response = resend.Emails.send({"from": "onboarding@resend.dev", "to": admin, "subject": "Test NutriScan", "html": "<h1>Test email NutriScan ✅</h1><p>Si vous recevez cet email, la configuration est correcte !</p>"})
         return {"success": True, "response": str(response)}
     except Exception as e:
-        print(f"❌ Erreur email : {e}")
         return {"error": str(e)}
