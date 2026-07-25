@@ -14,6 +14,7 @@ import uuid
 import resend
 from collections import defaultdict
 from datetime import datetime
+
 app = FastAPI()
 
 app.add_middleware(
@@ -25,12 +26,6 @@ app.add_middleware(
 
 from contribute_api import router as learning_router
 app.include_router(learning_router)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 if DATABASE_URL.startswith("postgres://"):
@@ -168,6 +163,17 @@ class CorrectionRequest(BaseModel):
     lipides_g: int
     user_id: str
 
+class ScanMenuRequest(BaseModel):
+    image_base64: str
+    semaine: str
+
+class AnalysePlatCantineRequest(BaseModel):
+    nom_plat: str
+    type_plat: str
+
+class ScanReceiptRequest(BaseModel):
+    prompt: str
+
 
 # MARK: — Helpers base partagée
 def chercher_plat_partage(nom: str):
@@ -258,6 +264,10 @@ def sauvegarder_plat_partage(result: dict):
 
 
 # MARK: — Endpoints
+@app.get("/")
+def root():
+    return {"message": "NutriScan API v1"}
+
 @app.post("/analyze")
 async def analyze(req: AnalyzeRequest):
     try:
@@ -331,7 +341,6 @@ Les valeurs macros doivent correspondre au poids total de {req.poids_plat}g."""
         clean = raw.replace("```json", "").replace("```", "").strip()
         result = json.loads(clean)
 
-        # Sauvegarde dans la base partagée
         sauvegarder_plat_partage(result)
 
         result["quota"] = {
@@ -385,7 +394,6 @@ async def soumettre_correction(req: CorrectionRequest):
 
     session = Session()
     try:
-        # Cherche le plat existant
         plat = chercher_plat_partage(req.nom_original)
         plat_id = plat.id if plat else None
 
@@ -404,7 +412,6 @@ async def soumettre_correction(req: CorrectionRequest):
         session.add(correction)
         session.commit()
 
-        # Envoie l'email à l'admin
         envoyer_email_correction(
             correction.id,
             req.nom_original,
@@ -472,7 +479,6 @@ async def valider_correction(correction_id: str):
         if correction.statut != "pending":
             return HTMLResponse(f"<h1>ℹ️ Correction déjà traitée ({correction.statut})</h1>")
         
-        # Met à jour le plat dans la base partagée
         if correction.plat_id:
             plat = session.query(PlatPartage).filter(
                 PlatPartage.id == correction.plat_id
@@ -484,7 +490,6 @@ async def valider_correction(correction_id: str):
                 plat.glucides_g = correction.glucides_corrige
                 plat.lipides_g = correction.lipides_corrige
         else:
-            # Crée un nouveau plat
             nouveau = PlatPartage(
                 id=str(uuid.uuid4()),
                 nom=correction.nom_corrige,
@@ -650,56 +655,6 @@ Règles : max 5 ingrédients, au moins 1 légume/fruit, moins de 20 minutes."""
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/quota/{user_id}")
-def get_quota(user_id: str):
-    return verifier_quota(user_id)
-
-
-@app.get("/check")
-def check():
-    key = os.environ.get("ANTHROPIC_API_KEY", "NON TROUVÉE")
-    db_ok = engine is not None
-    return {
-        "key_found": key != "NON TROUVÉE",
-        "database_connected": db_ok
-    }
-@app.get("/test-email")
-async def test_email():
-    """Test d'envoi d'email."""
-    admin = os.environ.get("ADMIN_EMAIL", "NON CONFIGURÉ")
-    api_key = os.environ.get("RESEND_API_KEY", "NON CONFIGURÉ")
-    
-    print(f"📧 Test email vers : {admin}")
-    print(f"🔑 Clé Resend : {api_key[:10]}...")
-    
-    if not api_key or api_key == "NON CONFIGURÉ":
-        return {"error": "RESEND_API_KEY manquante"}
-    
-    if not admin or admin == "NON CONFIGURÉ":
-        return {"error": "ADMIN_EMAIL manquant"}
-    
-    try:
-        resend.api_key = api_key
-        response = resend.Emails.send({
-            "from": "onboarding@resend.dev",
-            "to": admin,
-            "subject": "Test NutriScan",
-            "html": "<h1>Test email NutriScan ✅</h1><p>Si vous recevez cet email, la configuration est correcte !</p>"
-        })
-        print(f"✅ Email envoyé : {response}")
-        return {"success": True, "response": str(response)}
-    except Exception as e:
-        print(f"❌ Erreur email : {e}")
-        return {"error": str(e)}
-class ScanMenuRequest(BaseModel):
-    image_base64: str
-    semaine: str
-
-class AnalysePlatCantineRequest(BaseModel):
-    nom_plat: str
-    type_plat: str
-
-
 @app.post("/scan-menu")
 async def scan_menu(req: ScanMenuRequest):
     try:
@@ -794,9 +749,7 @@ Base-toi sur une portion standard de cantine scolaire (portion enfant)."""
         error_detail = traceback.format_exc()
         print(f"ERREUR ANALYSE PLAT CANTINE: {error_detail}")
         raise HTTPException(status_code=500, detail=str(e))
-        # MARK: — Scanner ticket de caisse (PDF)
-class ScanReceiptRequest(BaseModel):
-    prompt: str
+
 
 @app.post("/scan-receipt")
 async def scan_receipt(req: ScanReceiptRequest):
@@ -818,11 +771,9 @@ async def scan_receipt(req: ScanReceiptRequest):
         
         print(f"📄 Ticket analysé: {clean[:100]}...")
         
-        # Parse la réponse JSON
         data = json.loads(clean)
         aliments = data.get("aliments", [])
         
-        # Valide le format
         result = {
             "aliments": [
                 {
@@ -840,6 +791,57 @@ async def scan_receipt(req: ScanReceiptRequest):
         error_detail = traceback.format_exc()
         print(f"❌ ERREUR SCAN RECEIPT: {error_detail}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/quota/{user_id}")
+def get_quota(user_id: str):
+    return verifier_quota(user_id)
+
+
+@app.get("/check")
+def check():
+    key = os.environ.get("ANTHROPIC_API_KEY", "NON TROUVÉE")
+    db_ok = engine is not None
+    return {
+        "key_found": key != "NON TROUVÉE",
+        "database_connected": db_ok
+    }
+
+
+@app.get("/test-email")
+async def test_email():
+    """Test d'envoi d'email."""
+    admin = os.environ.get("ADMIN_EMAIL", "NON CONFIGURÉ")
+    api_key = os.environ.get("RESEND_API_KEY", "NON CONFIGURÉ")
+    
+    print(f"📧 Test email vers : {admin}")
+    print(f"🔑 Clé Resend : {api_key[:10]}...")
+    
+    if not api_key or api_key == "NON CONFIGURÉ":
+        return {"error": "RESEND_API_KEY manquante"}
+    
+    if not admin or admin == "NON CONFIGURÉ":
+        return {"error": "ADMIN_EMAIL manquant"}
+    
+    try:
+        resend.api_key = api_key
+        response = resend.Emails.send({
+            "from": "onboarding@resend.dev",
+            "to": admin,
+            "subject": "Test NutriScan",
+            "html": "<h1>Test email NutriScan ✅</h1><p>Si vous recevez cet email, la configuration est correcte !</p>"
+        })
+        print(f"✅ Email envoyé : {response}")
+        return {"success": True, "response": str(response)}
+    except Exception as e:
+        print(f"❌ Erreur email : {e}")
+        return {"error": str(e)}
+
+
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {
+        "status": "healthy",
+        "service": "nutriscan",
+        "version": "1.0.0"
+    }
