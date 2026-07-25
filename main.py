@@ -24,8 +24,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-from contribute_api import router as learning_router
-app.include_router(learning_router)
+# Décommenter si contribute_api existe et fonctionne
+# from contribute_api import router as learning_router
+# app.include_router(learning_router)
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 if DATABASE_URL.startswith("postgres://"):
@@ -266,7 +267,15 @@ def sauvegarder_plat_partage(result: dict):
 # MARK: — Endpoints
 @app.get("/")
 def root():
-    return {"message": "NutriScan API v1"}
+    return {"message": "NutriScan API v1", "status": "running"}
+
+@app.get("/health")
+def health():
+    return {
+        "status": "healthy",
+        "service": "nutriscan",
+        "version": "1.0.0"
+    }
 
 @app.post("/analyze")
 async def analyze(req: AnalyzeRequest):
@@ -755,19 +764,21 @@ Base-toi sur une portion standard de cantine scolaire (portion enfant)."""
 async def scan_receipt(req: ScanReceiptRequest):
     """Analyse un ticket de caisse via Claude"""
     try:
+        import re
+        
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
         
-        # ✅ Prompt amélioré avec instructions strictes pour le JSON
-        prompt = req.prompt if req.prompt else """Analyse ce texte de ticket de caisse.
-Retourne UNIQUEMENT un JSON valide, sans backticks, sans markdown.
-Les noms doivent être en français simple sans accents spéciaux.
-Format exact:
-{
-  "aliments": [
-    {"nom": "Produit", "quantite": "100g", "categorie": "Legumes"},
-    {"nom": "Lait", "quantite": "1L", "categorie": "Produits laitiers"}
-  ]
-}"""
+        # ✅ Prompt très strict pour forcer le JSON
+        prompt = req.prompt if req.prompt else """Tu es un expert en lecture de tickets de caisse.
+Analyse ce texte et extrais UNIQUEMENT les aliments avec quantités.
+
+RETOURNE UNIQUEMENT UN JSON VALIDE, SANS BACKTICKS, SANS TEXTE.
+PAS DE MARKDOWN, PAS D'EXPLICATIONS.
+
+JSON FORMAT:
+{"aliments": [{"nom": "Produit", "quantite": "100g", "categorie": "Legumes"}]}
+
+Catégories possibles: Legumes, Fruits, Viandes, Poissons, Produits laitiers, Boissons, Epicerie, Autres"""
         
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -779,39 +790,48 @@ Format exact:
         )
         
         raw = response.content[0].text
+        print(f"📄 Réponse brute de Claude ({len(raw)} chars):")
+        print(f"   {raw[:300]}...")
         
-        # ✅ Nettoyage agressif du JSON
+        # ✅ EXTRACTION ROBUSTE DU JSON
+        # Étape 1: Supprimer les backticks markdown
         clean = raw.replace("```json", "").replace("```", "").strip()
         
-        # Si le JSON commence pas par {, essayer de l'extraire
-        if not clean.startswith("{"):
-            import re
-            match = re.search(r'\{.*\}', clean, re.DOTALL)
-            if match:
-                clean = match.group(0)
+        # Étape 2: Extraire le JSON avec regex (capture tout entre { et })
+        json_match = re.search(r'\{.*\}', clean, re.DOTALL)
+        if json_match:
+            clean = json_match.group(0)
+            print(f"✅ JSON extrait par regex: {len(clean)} chars")
+        else:
+            print(f"⚠️ Pas de JSON trouvé dans la réponse")
+            clean = '{"aliments": []}'
         
-        print(f"📄 Ticket analysé (brut): {raw[:200]}...")
-        print(f"📄 Ticket analysé (nettoyé): {clean[:200]}...")
+        print(f"📄 JSON à parser: {clean[:300]}...")
         
-        # ✅ Parser le JSON avec gestion d'erreur
+        # Étape 3: Parser avec gestion d'erreur
+        data = None
         try:
             data = json.loads(clean)
+            print(f"✅ JSON parsé avec succès")
         except json.JSONDecodeError as e:
-            print(f"⚠️ Erreur JSON parsing: {e}")
-            print(f"⚠️ Tentative de correction...")
+            print(f"❌ Erreur JSON: {e}")
+            print(f"⚠️ Tentative de nettoyage agressif...")
             
-            # Essayer de corriger les guillemets mal échappés
-            clean_fixed = clean.replace('\\"', '"').replace('\\n', ' ')
+            # Nettoyer les caractères problématiques
+            clean_fixed = clean.encode('utf-8', 'ignore').decode('utf-8')
+            clean_fixed = re.sub(r',\s*}', '}', clean_fixed)  # Supprimer les virgules traînantes
+            clean_fixed = re.sub(r',\s*]', ']', clean_fixed)
+            
             try:
                 data = json.loads(clean_fixed)
+                print(f"✅ JSON parsé après nettoyage")
             except:
-                # En dernier recours, retourner une structure vide
-                print(f"❌ Impossible de parser le JSON")
+                print(f"❌ Impossible de parser, retour vide")
                 data = {"aliments": []}
         
-        aliments = data.get("aliments", [])
+        # Étape 4: Valider les données
+        aliments = data.get("aliments", []) if isinstance(data, dict) else []
         
-        # ✅ Valider et nettoyer les données
         result = {
             "aliments": [
                 {
@@ -820,17 +840,21 @@ Format exact:
                     "categorie": str(item.get("categorie", "Autres")).strip()
                 }
                 for item in aliments
-                if isinstance(item, dict) and item.get("nom")
+                if isinstance(item, dict) and item.get("nom") and str(item.get("nom")).strip()
             ]
         }
         
-        print(f"✅ Résultat final: {len(result['aliments'])} aliments extraits")
+        print(f"✅ Résultat final: {len(result['aliments'])} aliments trouvés")
+        for item in result['aliments']:
+            print(f"   - {item['nom']} ({item['quantite']}) [{item['categorie']}]")
+        
         return result
         
     except Exception as e:
         error_detail = traceback.format_exc()
         print(f"❌ ERREUR SCAN RECEIPT: {error_detail}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Retourner un résultat vide au lieu de crasher
+        return {"aliments": []}
 
 
 @app.get("/quota/{user_id}")
@@ -855,7 +879,7 @@ async def test_email():
     api_key = os.environ.get("RESEND_API_KEY", "NON CONFIGURÉ")
     
     print(f"📧 Test email vers : {admin}")
-    print(f"🔑 Clé Resend : {api_key[:10]}...")
+    print(f"🔑 Clé Resend : {api_key[:10] if api_key != 'NON CONFIGURÉ' else 'NON TROUVÉE'}...")
     
     if not api_key or api_key == "NON CONFIGURÉ":
         return {"error": "RESEND_API_KEY manquante"}
@@ -876,12 +900,3 @@ async def test_email():
     except Exception as e:
         print(f"❌ Erreur email : {e}")
         return {"error": str(e)}
-
-
-@app.get("/health")
-def health():
-    return {
-        "status": "healthy",
-        "service": "nutriscan",
-        "version": "1.0.0"
-    }
