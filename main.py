@@ -505,60 +505,61 @@ async def scan_receipt(req: ScanReceiptRequest):
     """Analyse un ticket de caisse via Claude"""
     try:
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-        prompt = req.prompt if req.prompt else """Analyse ce ticket de caisse et retourne UNIQUEMENT du JSON valide:
-{"aliments": [{"nom": "Produit", "quantite": "100g", "categorie": "Legumes"}]}"""
-        response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=1024, messages=[{"role": "user", "content": prompt}])
+        prompt = req.prompt if req.prompt else """Analyse ce ticket de caisse et retourne UNIQUEMENT:
+[{"nom": "Produit", "quantite": "100g", "categorie": "Legumes"}]"""
+        
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        
         raw = response.content[0].text
         print(f"📄 Réponse brute: {len(raw)} chars")
         
         # Remove markdown
         clean = raw.replace("```json", "").replace("```", "").strip()
         
-        # Extract JSON
-        match = re.search(r'\{.*\}', clean, re.DOTALL)
-        if not match:
-            print("❌ No JSON found")
-            return {"aliments": []}
-        clean = match.group(0)
-        
-        # ✅ FIX: Aggressive Unicode sanitization
-        print(f"⚙️ Sanitizing Unicode...")
-        
-        # Replace smart quotes
+        # Replace smart quotes and dangerous chars
         clean = clean.replace(""", '"').replace(""", '"')
         clean = clean.replace("'", "'").replace("'", "'")
-        
-        # Replace & and &amp;
         clean = clean.replace("&amp;", "and")
         clean = clean.replace("&", "and")
-        
-        # Remove dangerous chars
         clean = clean.replace("'", "")
-        clean = clean.replace("\x00", "")
-        clean = clean.replace("\r", "")
         
-        # Fix common encoding issues
-        clean = re.sub(r'[\x80-\x9F]', '', clean)  # Remove control chars
-        
-        print(f"✅ Unicode cleaned")
-        
-        # Parse JSON
-        try:
-            data = json.loads(clean)
-        except:
-            print(f"❌ JSON parse failed")
+        # Extract JUST the array [...]
+        match = re.search(r'\[.*\]', clean, re.DOTALL)
+        if not match:
+            print("❌ No array found")
             return {"aliments": []}
         
-        aliments = data.get("aliments", [])
+        clean = match.group(0)
+        print(f"✅ Array extracted: {len(clean)} chars")
+        
+        # Parse as array
+        try:
+            aliments = json.loads(clean)
+        except Exception as e:
+            print(f"❌ Array parse failed: {e}")
+            return {"aliments": []}
+        
+        # Ensure it's a list
+        if not isinstance(aliments, list):
+            aliments = []
+        
         result = {
             "aliments": [
-                {"nom": str(item.get("nom", "")).strip(), "quantite": str(item.get("quantite", "")).strip(), "categorie": str(item.get("categorie", "")).strip()}
+                {
+                    "nom": str(item.get("nom", "")).strip(),
+                    "quantite": str(item.get("quantite", "")).strip(),
+                    "categorie": str(item.get("categorie", "")).strip()
+                }
                 for item in aliments
-                if item.get("nom")
+                if isinstance(item, dict) and item.get("nom")
             ]
         }
         
-        print(f"✅ Result: {len(result['aliments'])} items")
+        print(f"✅ Result: {len(result['aliments'])} items found")
         return result
         
     except Exception as e:
