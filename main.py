@@ -757,34 +757,74 @@ async def scan_receipt(req: ScanReceiptRequest):
     try:
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
         
+        # ✅ Prompt amélioré avec instructions strictes pour le JSON
+        prompt = req.prompt if req.prompt else """Analyse ce texte de ticket de caisse.
+Retourne UNIQUEMENT un JSON valide, sans backticks, sans markdown.
+Les noms doivent être en français simple sans accents spéciaux.
+Format exact:
+{
+  "aliments": [
+    {"nom": "Produit", "quantite": "100g", "categorie": "Legumes"},
+    {"nom": "Lait", "quantite": "1L", "categorie": "Produits laitiers"}
+  ]
+}"""
+        
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=1024,
             messages=[{
                 "role": "user",
-                "content": req.prompt
+                "content": prompt
             }]
         )
         
         raw = response.content[0].text
+        
+        # ✅ Nettoyage agressif du JSON
         clean = raw.replace("```json", "").replace("```", "").strip()
         
-        print(f"📄 Ticket analysé: {clean[:100]}...")
+        # Si le JSON commence pas par {, essayer de l'extraire
+        if not clean.startswith("{"):
+            import re
+            match = re.search(r'\{.*\}', clean, re.DOTALL)
+            if match:
+                clean = match.group(0)
         
-        data = json.loads(clean)
+        print(f"📄 Ticket analysé (brut): {raw[:200]}...")
+        print(f"📄 Ticket analysé (nettoyé): {clean[:200]}...")
+        
+        # ✅ Parser le JSON avec gestion d'erreur
+        try:
+            data = json.loads(clean)
+        except json.JSONDecodeError as e:
+            print(f"⚠️ Erreur JSON parsing: {e}")
+            print(f"⚠️ Tentative de correction...")
+            
+            # Essayer de corriger les guillemets mal échappés
+            clean_fixed = clean.replace('\\"', '"').replace('\\n', ' ')
+            try:
+                data = json.loads(clean_fixed)
+            except:
+                # En dernier recours, retourner une structure vide
+                print(f"❌ Impossible de parser le JSON")
+                data = {"aliments": []}
+        
         aliments = data.get("aliments", [])
         
+        # ✅ Valider et nettoyer les données
         result = {
             "aliments": [
                 {
-                    "nom": item.get("nom", "Produit"),
-                    "quantite": item.get("quantite", "variable"),
-                    "categorie": item.get("categorie", "Autres")
+                    "nom": str(item.get("nom", "Produit")).strip(),
+                    "quantite": str(item.get("quantite", "variable")).strip(),
+                    "categorie": str(item.get("categorie", "Autres")).strip()
                 }
                 for item in aliments
+                if isinstance(item, dict) and item.get("nom")
             ]
         }
         
+        print(f"✅ Résultat final: {len(result['aliments'])} aliments extraits")
         return result
         
     except Exception as e:
