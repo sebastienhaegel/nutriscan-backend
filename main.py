@@ -806,10 +806,11 @@ Catégories possibles: Legumes, Fruits, Viandes, Poissons, Produits laitiers, Bo
         
         # ✅ ÉTAPE 3: Nettoyer les caractères spéciaux AVANT de parser
         print(f"⚙️ Nettoyage des caractères spéciaux...")
-        
-        # Remplacer & par et
-        clean = re.sub(r'"([^"]*&[^"]*)"', lambda m: f'"{m.group(1).replace("&", "et")}"', clean)
+
+        # Remplacer & directement (plus simple que regex)
+        clean = clean.replace("&", "et")
         clean = clean.replace("'", "")
+        print(f"✅ Caractères & remplacés par 'et'")
         
         print(f"📄 JSON après nettoyage: {clean[:300]}...")
         
