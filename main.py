@@ -393,6 +393,120 @@ def root():
     return {"message": "NutriScan API v1", "status": "running"}
 
 @app.get("/health")
+# =====================================================================
+#  À AJOUTER dans main.py, juste après l'endpoint @app.get("/health")
+# =====================================================================
+
+@app.get("/privacy", response_class=HTMLResponse)
+def privacy():
+    """Politique de confidentialité — URL requise par App Store Connect."""
+    return HTMLResponse("""<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NutriScan — Politique de confidentialité</title>
+<style>
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+       max-width:720px;margin:0 auto;padding:32px 20px;line-height:1.65;color:#1c1c1e}
+  h1{font-size:1.7rem;margin-bottom:.2em}
+  h2{font-size:1.15rem;margin-top:2em;color:#166534}
+  .maj{color:#6b7280;font-size:.9rem;margin-top:0}
+  ul{padding-left:1.2em}
+  li{margin-bottom:.4em}
+  code{background:#f3f4f6;padding:2px 5px;border-radius:4px;font-size:.9em}
+  footer{margin-top:3em;padding-top:1em;border-top:1px solid #e5e7eb;
+         color:#6b7280;font-size:.9rem}
+</style>
+</head>
+<body>
+
+<h1>Politique de confidentialité — NutriScan</h1>
+<p class="maj">Dernière mise à jour : 26 juillet 2026</p>
+
+<p>NutriScan analyse des photos de repas pour en estimer la valeur
+nutritionnelle. Cette page décrit les données traitées et leur destination.</p>
+
+<h2>Données conservées sur votre appareil</h2>
+<p>Les informations suivantes restent stockées localement sur votre iPhone et
+ne sont transmises à aucun serveur :</p>
+<ul>
+  <li>Les profils familiaux : prénom, âge, poids, sexe, objectif, photo</li>
+  <li>L'historique des repas et les portions attribuées à chaque profil</li>
+  <li>L'inventaire du réfrigérateur et les menus de cantine</li>
+  <li>Votre base de plats personnelle</li>
+</ul>
+<p>La suppression de l'application efface définitivement ces données.
+Aucune sauvegarde n'en est conservée de notre côté.</p>
+
+<h2>Données transmises lors d'une analyse</h2>
+<p>Quand vous analysez un repas, sont envoyés à notre serveur puis à
+l'API Claude d'Anthropic :</p>
+<ul>
+  <li>La photo du repas</li>
+  <li>L'âge, le poids, le sexe et l'objectif nutritionnel du profil actif</li>
+  <li>Le poids estimé du plat et, le cas échéant, le nom que vous avez saisi</li>
+  <li>Un identifiant anonyme servant à limiter le nombre d'analyses
+      quotidiennes — il ne permet pas de vous identifier</li>
+</ul>
+<p>Anthropic traite ces données pour produire l'analyse. Consultez leur
+politique de confidentialité sur <code>anthropic.com/privacy</code>.</p>
+
+<h2>Base de plats partagée</h2>
+<p>Les résultats d'analyse (nom du plat, calories, macronutriments, score)
+sont enregistrés dans une base commune à tous les utilisateurs, afin
+d'éviter de réanalyser un plat déjà connu. Cette base ne contient
+<strong>ni photo, ni donnée de profil, ni identifiant</strong> — uniquement
+des informations nutritionnelles sur des plats.</p>
+
+<h2>Amélioration de la reconnaissance</h2>
+<p>Les photos analysées peuvent être transmises à notre système
+d'apprentissage, accompagnées du nom du plat, pour améliorer la
+reconnaissance automatique. Ces photos ne sont associées à aucun profil
+ni à aucun identifiant utilisateur.</p>
+
+<h2>Corrections</h2>
+<p>Si vous corrigez les valeurs nutritionnelles d'un plat, la correction
+est transmise par courriel à l'administrateur pour validation. Elle
+contient le nom du plat, les valeurs corrigées et un identifiant anonyme.</p>
+
+<h2>Ce que nous ne faisons pas</h2>
+<ul>
+  <li>Aucune publicité, aucun traceur publicitaire</li>
+  <li>Aucune revente ni partage commercial de données</li>
+  <li>Aucun compte utilisateur, aucun mot de passe collecté</li>
+  <li>Aucune géolocalisation</li>
+</ul>
+
+<h2>Conservation</h2>
+<p>Les données de profil et l'historique demeurent sur votre appareil aussi
+longtemps que l'application y est installée. Les informations
+nutritionnelles de la base partagée sont conservées sans limite de durée,
+n'étant rattachées à aucune personne.</p>
+
+<h2>Vos droits</h2>
+<p>Conformément au Règlement général sur la protection des données (RGPD),
+vous disposez d'un droit d'accès, de rectification, d'effacement et
+d'opposition. Les données locales s'effacent depuis l'application
+(historique) ou en la désinstallant. Pour toute autre demande,
+écrivez-nous à l'adresse ci-dessous.</p>
+
+<h2>Enfants</h2>
+<p>L'application permet de créer des profils pour des enfants, gérés par un
+adulte. Les données de ces profils restent sur l'appareil et ne sont
+transmises que dans le cadre décrit plus haut.</p>
+
+<h2>Modifications</h2>
+<p>Cette politique peut évoluer. La date en tête de page indique la
+dernière révision.</p>
+
+<h2>Contact</h2>
+<p>Pour toute question relative à vos données : <code>haegel.s@hotmail.fr</code></p>
+
+<footer>NutriScan — application indépendante</footer>
+
+</body>
+</html>""")
 def health():
     return {"status": "healthy", "service": "nutriscan", "version": "1.0.0"}
 
