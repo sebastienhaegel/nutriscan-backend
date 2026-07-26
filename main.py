@@ -393,9 +393,9 @@ def root():
     return {"message": "NutriScan API v1", "status": "running"}
 
 @app.get("/health")
-# =====================================================================
-#  À AJOUTER dans main.py, juste après l'endpoint @app.get("/health")
-# =====================================================================
+def health():
+    return {"status": "healthy", "service": "nutriscan", "version": "1.0.0"}
+
 
 @app.get("/privacy", response_class=HTMLResponse)
 def privacy():
@@ -507,8 +507,96 @@ dernière révision.</p>
 
 </body>
 </html>""")
-def health():
-    return {"status": "healthy", "service": "nutriscan", "version": "1.0.0"}
+
+
+@app.get("/support", response_class=HTMLResponse)
+def support():
+    """Page d'assistance — URL requise par App Store Connect."""
+    return HTMLResponse("""<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NutriScan — Assistance</title>
+<style>
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+       max-width:720px;margin:0 auto;padding:32px 20px;line-height:1.65;color:#1c1c1e}
+  h1{font-size:1.7rem;margin-bottom:.1em}
+  .sous{color:#6b7280;margin-top:0}
+  h2{font-size:1.15rem;margin-top:2em;color:#166534}
+  .q{font-weight:600;margin-bottom:.2em;margin-top:1.2em}
+  .contact{background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;
+           padding:18px 20px;margin:2em 0}
+  code{background:#f3f4f6;padding:2px 5px;border-radius:4px;font-size:.9em}
+  a{color:#166534}
+  footer{margin-top:3em;padding-top:1em;border-top:1px solid #e5e7eb;
+         color:#6b7280;font-size:.9rem}
+</style>
+</head>
+<body>
+
+<h1>Assistance NutriScan</h1>
+<p class="sous">Aide et contact</p>
+
+<div class="contact">
+  <strong>Une question, un problème ?</strong><br>
+  Écrivez à <a href="mailto:haegel.s@hotmail.fr">haegel.s@hotmail.fr</a><br>
+  <span style="color:#6b7280;font-size:.9rem">Réponse sous quelques jours.</span>
+</div>
+
+<h2>Questions fréquentes</h2>
+
+<p class="q">Comment analyser un repas ?</p>
+<p>Depuis l'onglet Analyser, prenez une photo ou choisissez-en une dans
+votre galerie. Saisissez le nom du plat si vous le connaissez : l'analyse
+sera nettement plus précise. Ajustez le poids estimé, puis lancez
+l'analyse.</p>
+
+<p class="q">Pourquoi le poids du plat est-il important ?</p>
+<p>Toutes les valeurs nutritionnelles en découlent, ainsi que le calcul des
+portions lorsqu'un plat est partagé. Un poids erroné fausse l'ensemble des
+résultats.</p>
+
+<p class="q">Comment partager un plat entre plusieurs personnes ?</p>
+<p>Dans le calendrier, appuyez sur un repas. Indiquez la quantité en grammes
+consommée par chaque membre. Les calories sont réparties proportionnellement
+et apparaissent dans le calendrier de chacun.</p>
+
+<p class="q">Comment ajouter un membre de la famille ?</p>
+<p>Appuyez sur le sélecteur de profil, en haut de l'onglet Analyser. Vous
+pouvez y créer, modifier ou supprimer des profils.</p>
+
+<p class="q">Mes anciens repas affichent 0 kcal</p>
+<p>Les repas enregistrés avant la mise à jour ne comportaient pas de données
+caloriques. Seuls les repas analysés depuis affichent leurs valeurs.</p>
+
+<p class="q">L'analyse échoue ou renvoie une erreur</p>
+<p>Vérifiez votre connexion : l'analyse nécessite Internet. Le nombre
+d'analyses est également limité chaque jour ; le compteur restant s'affiche
+sous la photo.</p>
+
+<p class="q">Comment scanner un ticket de caisse ?</p>
+<p>Dans l'onglet Frigo, choisissez l'option PDF et sélectionnez le fichier
+de votre ticket. Les produits alimentaires sont ajoutés automatiquement à
+l'inventaire.</p>
+
+<p class="q">Puis-je supprimer mes données ?</p>
+<p>Le bouton corbeille du calendrier efface l'historique. Désinstaller
+l'application supprime définitivement toutes les données locales.</p>
+
+<h2>Signaler une erreur nutritionnelle</h2>
+<p>Si les valeurs d'un plat vous semblent inexactes, utilisez le bouton
+« Corriger ce plat » sous le résultat d'analyse. Les corrections sont
+examinées avant d'être appliquées.</p>
+
+<h2>Confidentialité</h2>
+<p>Consultez la <a href="/privacy">politique de confidentialité</a>.</p>
+
+<footer>NutriScan — application indépendante</footer>
+
+</body>
+</html>""")
+
 
 @app.post("/analyze")
 async def analyze(req: AnalyzeRequest):
@@ -838,4 +926,3 @@ async def test_email():
         return {"success": True, "response": str(response)}
     except Exception as e:
         return {"error": str(e)}
-
