@@ -962,7 +962,7 @@ class ScoreAlimentRequest(BaseModel):
 
 
 @app.post("/score-aliment")
-async def score_aliment(req: ScoreAlimentRequest):
+async def score_aliment(req: ScoreAlimentRequest, force: bool = False):
     """Note un aliment sur 100 g. Claude n'est appelé qu'une fois par
     aliment, tous utilisateurs confondus : le score suivant vient du cache.
     """
@@ -972,7 +972,7 @@ async def score_aliment(req: ScoreAlimentRequest):
         raise HTTPException(status_code=400, detail="source_code requis")
 
     # ---- 1. Le cache -------------------------------------------------
-    if engine:
+    if engine and not force:
         session = Session()
         try:
             connu = session.query(ScoreAliment).filter(
@@ -1004,6 +1004,12 @@ Aliment : {req.nom}
 Pour 100 g : {req.calories} kcal, {req.proteines_g} g de protéines,
 {req.glucides_g} g de glucides, {req.lipides_g} g de lipides,
 {req.fibres_g} g de fibres.
+
+Ces chiffres viennent de la table Ciqual de l'Anses et ne couvrent que
+les macronutriments. Ne pénalise PAS l'aliment pour les données absentes
+et ne commente pas leur absence : appuie-toi sur ta connaissance de cet
+aliment pour les vitamines, minéraux et le degré de transformation.
+Une valeur à 0 peut signifier « non renseigné » et non « absent ».
 
 Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
 {{"score": 85, "verdict": "Excellent choix", "commentaire": "Deux phrases sur l'intérêt nutritionnel de cet aliment.", "conseils": ["Conseil 1", "Conseil 2"]}}
@@ -1052,3 +1058,4 @@ micronutriments mérite une note élevée même s'il est calorique."""
 
     resultat["cache"] = False
     return resultat
+
