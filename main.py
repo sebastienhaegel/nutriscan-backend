@@ -926,3 +926,129 @@ async def test_email():
         return {"success": True, "response": str(response)}
     except Exception as e:
         return {"error": str(e)}
+
+
+class ScoreAliment(Base):
+    """Score nutritionnel d'un aliment Ciqual, pour 100 g.
+
+    Clé = alim_code de l'Anses : exact et stable, contrairement au
+    rapprochement flou sur les mots qui confondrait « Pomme » et
+    « Pomme de terre ». Table distincte de plats_partages, qui contient
+    des plats composés dont les macros portent sur une portion entière.
+    """
+    __tablename__ = "scores_aliments"
+    source_code = Column(String, primary_key=True)
+    nom = Column(String, nullable=False)
+    score = Column(Integer, default=0)
+    verdict = Column(String, default="")
+    commentaire = Column(Text, default="")
+    conseils = Column(Text, default="[]")
+    date_creation = Column(DateTime, default=datetime.utcnow)
+    nombre_demandes = Column(Integer, default=1)
+
+
+if engine:
+    Base.metadata.create_all(engine)
+
+
+class ScoreAlimentRequest(BaseModel):
+    source_code: str
+    nom: str
+    calories: int = 0
+    proteines_g: int = 0
+    glucides_g: int = 0
+    lipides_g: int = 0
+    fibres_g: int = 0
+
+
+@app.post("/score-aliment")
+async def score_aliment(req: ScoreAlimentRequest):
+    """Note un aliment sur 100 g. Claude n'est appelé qu'une fois par
+    aliment, tous utilisateurs confondus : le score suivant vient du cache.
+    """
+    defaut = {"score": 0, "verdict": "", "commentaire": "", "conseils": [], "cache": False}
+
+    if not req.source_code:
+        raise HTTPException(status_code=400, detail="source_code requis")
+
+    # ---- 1. Le cache -------------------------------------------------
+    if engine:
+        session = Session()
+        try:
+            connu = session.query(ScoreAliment).filter(
+                ScoreAliment.source_code == req.source_code).first()
+            if connu:
+                connu.nombre_demandes += 1
+                session.commit()
+                print(f"[score-aliment] cache : {connu.nom} = {connu.score}")
+                return {
+                    "score": connu.score,
+                    "verdict": connu.verdict,
+                    "commentaire": connu.commentaire,
+                    "conseils": json.loads(connu.conseils) if connu.conseils else [],
+                    "cache": True,
+                }
+        except Exception as e:
+            print(f"[score-aliment] lecture cache impossible : {e}")
+        finally:
+            session.close()
+
+    # ---- 2. Claude ---------------------------------------------------
+    try:
+        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        prompt = f"""Tu es un expert en nutrition. Note la qualité nutritionnelle
+de cet aliment brut, pour 100 grammes. La note porte sur l'aliment lui-même,
+sa densité nutritionnelle — pas sur la quantité consommée.
+
+Aliment : {req.nom}
+Pour 100 g : {req.calories} kcal, {req.proteines_g} g de protéines,
+{req.glucides_g} g de glucides, {req.lipides_g} g de lipides,
+{req.fibres_g} g de fibres.
+
+Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
+{{"score": 85, "verdict": "Excellent choix", "commentaire": "Deux phrases sur l'intérêt nutritionnel de cet aliment.", "conseils": ["Conseil 1", "Conseil 2"]}}
+
+Le score va de 0 à 100. Un aliment brut peu transformé et riche en
+micronutriments mérite une note élevée même s'il est calorique."""
+
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        resultat = parser_json_claude(response, defaut=dict(defaut), contexte="score-aliment")
+    except Exception as e:
+        print(f"[score-aliment] Claude indisponible : {e}")
+        raise HTTPException(status_code=502, detail="Notation indisponible")
+
+    resultat["score"] = _to_int(resultat.get("score"))
+    resultat["verdict"] = str(resultat.get("verdict", "")).strip()
+    resultat["commentaire"] = str(resultat.get("commentaire", "")).strip()
+    resultat["conseils"] = [str(c).strip() for c in (resultat.get("conseils") or []) if str(c).strip()]
+
+    if not resultat["score"]:
+        raise HTTPException(status_code=502, detail="Réponse IA illisible")
+
+    # ---- 3. Mémoriser pour tout le monde -----------------------------
+    if engine:
+        session = Session()
+        try:
+            session.merge(ScoreAliment(
+                source_code=req.source_code,
+                nom=req.nom,
+                score=resultat["score"],
+                verdict=resultat["verdict"],
+                commentaire=resultat["commentaire"],
+                conseils=json.dumps(resultat["conseils"], ensure_ascii=False),
+                nombre_demandes=1,
+            ))
+            session.commit()
+            print(f"[score-aliment] mémorisé : {req.nom} = {resultat['score']}")
+        except Exception as e:
+            session.rollback()
+            print(f"[score-aliment] écriture impossible : {e}")
+        finally:
+            session.close()
+
+    resultat["cache"] = False
+    return resultat
