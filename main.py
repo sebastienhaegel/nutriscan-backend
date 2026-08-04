@@ -654,6 +654,19 @@ Les valeurs macros doivent correspondre au poids total de {req.poids_plat}g."""
         if not result:
             raise HTTPException(status_code=502, detail="Réponse IA illisible, réessayez")
         result = normaliser_resultat(result)   # ✅ force les entiers pour Swift
+
+        # Trace de la décomposition : c'est le seul moyen de vérifier que
+        # Claude nomme les ingrédients comme la table Ciqual, condition
+        # pour que la résolution locale fonctionne côté app.
+        ingr = result.get("ingredients") or []
+        if ingr:
+            total = sum(i["grammes"] for i in ingr)
+            print(f"[analyze] {len(ingr)} ingrédient(s), {total} g au total :")
+            for i in ingr:
+                print(f"[analyze]   {i['grammes']:>4} g  {i['nom']}")
+        else:
+            print("[analyze] ⚠️ aucun ingrédient dans la réponse")
+
         sauvegarder_plat_partage(result)
         result["quota"] = {"restants": MAX_ANALYSES_PAR_JOUR - len(user_analyses[req.user_id]), "maximum": MAX_ANALYSES_PAR_JOUR}
         return result
