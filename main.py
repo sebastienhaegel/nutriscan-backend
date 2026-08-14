@@ -223,6 +223,23 @@ def normaliser_resultat(result: dict) -> dict:
     conseils = result.get("conseils") or []
     result["conseils"] = [str(c).strip() for c in conseils if str(c).strip()]
 
+    # Décomposition en ingrédients : mêmes contraintes de type que le reste,
+    # et on écarte les lignes sans nom ou sans masse, inexploitables côté app.
+    ingredients = result.get("ingredients") or []
+    result["ingredients"] = [
+        {
+            "nom": str(i.get("nom", "")).strip(),
+            "grammes": _to_int(i.get("grammes")),
+            "calories": _to_int(i.get("calories")),
+            "proteines_g": _to_int(i.get("proteines_g")),
+            "glucides_g": _to_int(i.get("glucides_g")),
+            "lipides_g": _to_int(i.get("lipides_g")),
+        }
+        for i in ingredients
+        if isinstance(i, dict) and str(i.get("nom", "")).strip()
+        and _to_int(i.get("grammes")) > 0
+    ]
+
     return result
 
 
@@ -613,14 +630,43 @@ Profil : {req.gender}, {req.age} ans, {req.weight} kg, objectif: {req.goal}.
 Poids total du plat servi sur la photo : {req.poids_plat} grammes.
 {indication_plat}
 Retourne exactement ce format JSON :
-{{"nom": "Nom du plat identifié", "description": "Description courte (1-2 phrases)", "score": 72, "verdict": "Titre du bilan", "commentaire": "Commentaire personnalisé (2-3 phrases)", "macros": {{"calories": 650, "proteines_g": 35, "glucides_g": 70, "lipides_g": 22}}, "nutrients": [{{"nom": "Protéines", "pct": 65, "niveau": "medium"}}, {{"nom": "Glucides", "pct": 85, "niveau": "good"}}, {{"nom": "Lipides", "pct": 45, "niveau": "low"}}, {{"nom": "Fibres", "pct": 30, "niveau": "low"}}, {{"nom": "Vitamines", "pct": 70, "niveau": "medium"}}, {{"nom": "Minéraux", "pct": 55, "niveau": "medium"}}], "conseils": ["Conseil 1", "Conseil 2", "Conseil 3"]}}
+{{"nom": "Nom du plat identifié", "description": "Description courte (1-2 phrases)", "score": 72, "verdict": "Titre du bilan", "commentaire": "Commentaire personnalisé (2-3 phrases)", "macros": {{"calories": 650, "proteines_g": 35, "glucides_g": 70, "lipides_g": 22}}, "ingredients": [{{"nom": "Riz blanc cuit", "grammes": 150, "calories": 195, "proteines_g": 4, "glucides_g": 42, "lipides_g": 1}}, {{"nom": "Poulet, blanc, cuit", "grammes": 120, "calories": 180, "proteines_g": 36, "glucides_g": 0, "lipides_g": 4}}], "nutrients": [{{"nom": "Protéines", "pct": 65, "niveau": "medium"}}, {{"nom": "Glucides", "pct": 85, "niveau": "good"}}, {{"nom": "Lipides", "pct": 45, "niveau": "low"}}, {{"nom": "Fibres", "pct": 30, "niveau": "low"}}, {{"nom": "Vitamines", "pct": 70, "niveau": "medium"}}, {{"nom": "Minéraux", "pct": 55, "niveau": "medium"}}], "conseils": ["Conseil 1", "Conseil 2", "Conseil 3"]}}
+
+RÈGLES POUR « ingredients » :
+- Décompose le plat en 2 à 8 ingrédients principaux, du plus lourd au plus léger.
+- Nomme chaque ingrédient comme le ferait la table Ciqual de l'Anses :
+  en français, générique, sans marque, avec l'état de cuisson quand il
+  compte. « Riz blanc cuit », pas « Riz Uncle Ben's ». « Poulet, blanc,
+  cuit », pas « escalope ». Ces noms servent à retrouver l'aliment dans
+  une base de données : un nom de marque ou familier échouera.
+- Les grammages doivent totaliser environ {req.poids_plat} g, mais ce sont
+  surtout les PROPORTIONS entre ingrédients qui comptent : l'application
+  les remettra à l'échelle du poids réel indiqué par l'utilisateur.
+- Donne aussi les macros de chaque ingrédient POUR LE GRAMMAGE indiqué.
+  Elles servent de valeur de repli quand l'ingrédient reste introuvable
+  dans la base.
+- La somme des macros des ingrédients doit rester cohérente avec « macros ».
+
 Les valeurs macros doivent correspondre au poids total de {req.poids_plat}g."""
-        response = client.messages.create(model="claude-sonnet-4-5", max_tokens=2000, messages=[{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": req.image_base64}}, {"type": "text", "text": prompt}]}])
+        response = client.messages.create(model="claude-sonnet-4-5", max_tokens=3000, messages=[{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": req.image_base64}}, {"type": "text", "text": prompt}]}])
         enregistrer_appel(req.user_id)
         result = parser_json_claude(response, defaut={}, contexte="analyze")
         if not result:
             raise HTTPException(status_code=502, detail="Réponse IA illisible, réessayez")
         result = normaliser_resultat(result)   # ✅ force les entiers pour Swift
+
+        # Trace de la décomposition : c'est le seul moyen de vérifier que
+        # Claude nomme les ingrédients comme la table Ciqual, condition
+        # pour que la résolution locale fonctionne côté app.
+        ingr = result.get("ingredients") or []
+        if ingr:
+            total = sum(i["grammes"] for i in ingr)
+            print(f"[analyze] {len(ingr)} ingrédient(s), {total} g au total :")
+            for i in ingr:
+                print(f"[analyze]   {i['grammes']:>4} g  {i['nom']}")
+        else:
+            print("[analyze] ⚠️ aucun ingrédient dans la réponse")
+
         sauvegarder_plat_partage(result)
         result["quota"] = {"restants": MAX_ANALYSES_PAR_JOUR - len(user_analyses[req.user_id]), "maximum": MAX_ANALYSES_PAR_JOUR}
         return result
@@ -794,7 +840,7 @@ Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
 {{"semaine": "{req.semaine}", "jours": [{{"jour": "Lundi", "date": "2024-01-15", "plats": [{{"nom": "Carottes râpées", "type_plat": "entree"}}, {{"nom": "Poulet rôti", "type_plat": "plat"}}, {{"nom": "Haricots verts", "type_plat": "accompagnement"}}, {{"nom": "Yaourt", "type_plat": "dessert"}}]}}]}}
 Types possibles : "entree", "plat", "accompagnement", "dessert", "laitage", "pain"
 Inclus uniquement les jours de semaine (Lundi à Vendredi)."""
-        response = client.messages.create(model="claude-sonnet-4-5", max_tokens=2000, messages=[{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": req.image_base64}}, {"type": "text", "text": prompt}]}])
+        response = client.messages.create(model="claude-sonnet-4-5", max_tokens=3000, messages=[{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": req.image_base64}}, {"type": "text", "text": prompt}]}])
         return parser_json_claude(response, defaut={"semaine": req.semaine, "jours": []}, contexte="scan-menu")
     except Exception as e:
         error_detail = traceback.format_exc()
@@ -1058,3 +1104,82 @@ micronutriments mérite une note élevée même s'il est calorique."""
 
     resultat["cache"] = False
     return resultat
+
+
+class LireEtiquetteRequest(BaseModel):
+    image_base64: str
+
+
+@app.post("/lire-etiquette")
+async def lire_etiquette(req: LireEtiquetteRequest):
+    """Lit le tableau nutritionnel d'une étiquette photographiée.
+
+    Tâche de lecture de texte, pas de reconnaissance de plat : c'est
+    fiable, contrairement à l'identification visuelle d'une poudre en pot.
+    Les valeurs restent proposées à l'utilisateur, jamais enregistrées
+    d'office — une virgule mal lue fausserait tout un suivi.
+    """
+    try:
+        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        prompt = """Tu lis l'étiquette d'un produit alimentaire emballé.
+
+Extrais le nom du produit, sa marque, son conditionnement et le tableau
+des valeurs nutritionnelles.
+
+PIÈGE IMPORTANT : beaucoup d'étiquettes affichent DEUX colonnes, « pour
+100 g » et « par portion ». Retourne TOUJOURS les valeurs pour 100 g.
+Si l'étiquette ne donne que les valeurs par portion, convertis-les pour
+100 g et indique la masse de la portion dans « portion_g ».
+
+Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
+{"nom": "Whey Native", "marque": "Nutripure", "quantite": "900 g", "categorie": "Épicerie", "calories": 380, "proteines_g": 78, "glucides_g": 5, "lipides_g": 4, "portion_g": 30, "converti": false, "lisible": true}
+
+Règles :
+- "categorie" parmi : "Boissons", "Produits laitiers", "Viandes/Poissons",
+  "Fruits", "Légumes", "Féculents", "Épicerie", "Autre".
+- "converti" vaut true si tu as dû ramener des valeurs de portion à 100 g.
+- "portion_g" vaut 0 si l'étiquette n'indique aucune portion.
+- Si le tableau est illisible ou absent, renvoie "lisible": false et des
+  valeurs à 0 : mieux vaut ne rien proposer qu'un chiffre inventé.
+- N'invente jamais une valeur absente de l'étiquette : mets 0."""
+
+        response = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64",
+                                             "media_type": "image/jpeg",
+                                             "data": req.image_base64}},
+                {"type": "text", "text": prompt},
+            ]}],
+        )
+
+        resultat = parser_json_claude(response, defaut={}, contexte="lire-etiquette")
+        if not resultat:
+            raise HTTPException(status_code=502, detail="Étiquette illisible")
+
+        propre = {
+            "nom": str(resultat.get("nom", "")).strip(),
+            "marque": str(resultat.get("marque", "")).strip(),
+            "quantite": str(resultat.get("quantite", "")).strip(),
+            "categorie": str(resultat.get("categorie", "Autre")).strip() or "Autre",
+            "calories": _to_int(resultat.get("calories")),
+            "proteines_g": _to_int(resultat.get("proteines_g")),
+            "glucides_g": _to_int(resultat.get("glucides_g")),
+            "lipides_g": _to_int(resultat.get("lipides_g")),
+            "portion_g": _to_int(resultat.get("portion_g")),
+            "converti": bool(resultat.get("converti", False)),
+            "lisible": bool(resultat.get("lisible", True)),
+        }
+
+        print(f"[lire-etiquette] {propre['nom'] or '(sans nom)'} — "
+              f"{propre['calories']} kcal/100 g"
+              + (" (converti depuis une portion)" if propre["converti"] else "")
+              + ("" if propre["lisible"] else " — ÉTIQUETTE ILLISIBLE"))
+        return propre
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[lire-etiquette] erreur : {e}")
+        raise HTTPException(status_code=500, detail=str(e))
