@@ -439,7 +439,7 @@ def privacy():
 <body>
 
 <h1>Politique de confidentialité — NutriScan</h1>
-<p class="maj">Dernière mise à jour : 26 juillet 2026</p>
+<p class="maj">Dernière mise à jour : 29 août 2026</p>
 
 <p>NutriScan analyse des photos de repas pour en estimer la valeur
 nutritionnelle. Cette page décrit les données traitées et leur destination.</p>
@@ -469,6 +469,14 @@ l'API Claude d'Anthropic :</p>
 <p>Anthropic traite ces données pour produire l'analyse. Consultez leur
 politique de confidentialité sur <code>anthropic.com/privacy</code>.</p>
 
+<h2>Codes-barres et étiquettes</h2>
+<p>Quand vous scannez un code-barres, celui-ci est envoyé au service
+Open Food Facts pour identifier le produit. Aucune donnée de profil ne
+l'accompagne.</p>
+<p>Quand vous photographiez une étiquette nutritionnelle, l'image est
+transmise à notre serveur puis à l'API Claude d'Anthropic, uniquement
+pour en lire les valeurs. Elle n'est pas conservée.</p>
+
 <h2>Base de plats partagée</h2>
 <p>Les résultats d'analyse (nom du plat, calories, macronutriments, score)
 sont enregistrés dans une base commune à tous les utilisateurs, afin
@@ -476,21 +484,46 @@ d'éviter de réanalyser un plat déjà connu. Cette base ne contient
 <strong>ni photo, ni donnée de profil, ni identifiant</strong> — uniquement
 des informations nutritionnelles sur des plats.</p>
 
-<h2>Amélioration de la reconnaissance</h2>
-<p>Les photos analysées peuvent être transmises à notre système
-d'apprentissage, accompagnées du nom du plat, pour améliorer la
-reconnaissance automatique. Ces photos ne sont associées à aucun profil
-ni à aucun identifiant utilisateur.</p>
-
 <h2>Corrections</h2>
 <p>Si vous corrigez les valeurs nutritionnelles d'un plat, la correction
 est transmise par courriel à l'administrateur pour validation. Elle
 contient le nom du plat, les valeurs corrigées et un identifiant anonyme.</p>
 
+<h2>Données de l'app Santé (HealthKit)</h2>
+<p>Avec votre autorisation explicite, NutriScan lit une seule donnée de
+l'app Santé d'Apple : <strong>les calories dépensées lors de vos
+activités physiques</strong>. Elles sont affichées à côté de vos apports
+alimentaires, pour en montrer le solde.</p>
+<ul>
+  <li>La lecture est <strong>ponctuelle</strong> : la donnée est affichée,
+      jamais enregistrée dans NutriScan</li>
+  <li>Elle n'est <strong>transmise à personne</strong> : ni à notre serveur,
+      ni à Anthropic, ni à aucun tiers</li>
+  <li>NutriScan <strong>n'écrit rien</strong> dans l'app Santé</li>
+  <li>Vous pouvez retirer cette autorisation à tout moment :
+      Réglages → Confidentialité et sécurité → Santé → NutriScan</li>
+</ul>
+<p>Refuser cet accès n'empêche aucune autre fonction de l'application.</p>
+
+<h2>Sources de données nutritionnelles</h2>
+<p>NutriScan s'appuie sur deux bases publiques, embarquées dans
+l'application :</p>
+<ul>
+  <li><strong>Table Ciqual</strong> de l'Anses — composition nutritionnelle
+      des aliments génériques</li>
+  <li><strong>Open Food Facts</strong> — produits emballés, sous licence
+      <em>Open Database License</em> (ODbL). Conformément à cette licence,
+      la base dérivée utilisée par l'application est disponible sous ODbL
+      sur simple demande à l'adresse de contact ci-dessous.</li>
+</ul>
+<p>Aucune de ces consultations ne nécessite de connexion : elles ont lieu
+sur votre appareil.</p>
+
 <h2>Ce que nous ne faisons pas</h2>
 <ul>
   <li>Aucune publicité, aucun traceur publicitaire</li>
-  <li>Aucune revente ni partage commercial de données</li>
+  <li>Aucune revente ni partage commercial de données, y compris celles
+      issues de l'app Santé</li>
   <li>Aucun compte utilisateur, aucun mot de passe collecté</li>
   <li>Aucune géolocalisation</li>
 </ul>
@@ -1183,3 +1216,338 @@ Règles :
     except Exception as e:
         print(f"[lire-etiquette] erreur : {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class AlimentGenerique(Base):
+    """Aliments obtenus par leur nom, pour 100 g.
+
+    Table distincte de plats_partages, qui stocke des PORTIONS entières :
+    mélanger les deux unités a déjà produit des calories fausses. Ici
+    tout est ramené à 100 g, comme Ciqual.
+
+    Couvre ce que Ciqual ignore : les marques (Big Mac), les plats
+    composés (bo bun au porc), les recettes du quotidien.
+    """
+    __tablename__ = "aliments_generiques"
+    nom_normalise = Column(String, primary_key=True)
+    nom = Column(String, nullable=False)
+    calories = Column(Integer, default=0)
+    proteines_g = Column(Integer, default=0)
+    glucides_g = Column(Integer, default=0)
+    lipides_g = Column(Integer, default=0)
+    fibres_g = Column(Integer, default=0)
+    portion_g = Column(Integer, default=0)
+    portion_libelle = Column(String, default="")
+    date_creation = Column(DateTime, default=datetime.utcnow)
+    nombre_demandes = Column(Integer, default=1)
+
+
+if engine:
+    Base.metadata.create_all(engine)
+
+
+class AlimentGeneriqueRequest(BaseModel):
+    nom: str
+
+
+def normaliser_nom(texte: str) -> str:
+    """Même normalisation que côté app : accents, ligatures, ponctuation."""
+    import unicodedata
+    t = texte.lower().replace("\u0153", "oe").replace("\u00e6", "ae")
+    t = unicodedata.normalize("NFD", t)
+    t = "".join(c for c in t if unicodedata.category(c) != "Mn")
+    t = re.sub(r"[,;:/()'\u2019\"_-]+", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+@app.post("/aliment-generique")
+async def aliment_generique(req: AlimentGeneriqueRequest, force: bool = False):
+    """Valeurs nutritionnelles d'un aliment nommé, POUR 100 G.
+
+    Claude n'est appelé qu'une fois par aliment : le suivant vient du
+    cache, pour tous les utilisateurs.
+    """
+    nom = (req.nom or "").strip()
+    if len(nom) < 3:
+        raise HTTPException(status_code=400, detail="Nom trop court")
+
+    cle = normaliser_nom(nom)
+
+    # ---- 1. Le cache ----------------------------------------------------
+    if engine and not force:
+        session = Session()
+        try:
+            connu = session.query(AlimentGenerique).filter(
+                AlimentGenerique.nom_normalise == cle).first()
+            if connu:
+                connu.nombre_demandes += 1
+                session.commit()
+                print(f"[aliment-generique] cache : {connu.nom} = {connu.calories} kcal/100 g")
+                return {
+                    "nom": connu.nom,
+                    "calories": connu.calories,
+                    "proteines_g": connu.proteines_g,
+                    "glucides_g": connu.glucides_g,
+                    "lipides_g": connu.lipides_g,
+                    "fibres_g": connu.fibres_g,
+                    "portion_g": connu.portion_g,
+                    "portion_libelle": connu.portion_libelle or "",
+                    "cache": True,
+                }
+        except Exception as e:
+            print(f"[aliment-generique] lecture cache impossible : {e}")
+        finally:
+            session.close()
+
+    # ---- 2. Claude ------------------------------------------------------
+    try:
+        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        prompt = f"""Donne les valeurs nutritionnelles de cet aliment ou plat,
+POUR 100 GRAMMES.
+
+Aliment : {nom}
+
+Il peut s'agir d'un produit de marque (Big Mac, Nutella), d'un plat
+composé (bo bun au porc, poulet basquaise), ou d'une préparation
+courante. Appuie-toi sur les valeurs publiées par le fabricant quand
+elles existent, sinon sur une recette standard.
+
+Indique aussi une PORTION USUELLE : le poids d'une part telle qu'elle
+est réellement servie. Un Big Mac pèse environ 219 g, un bol de bo bun
+environ 450 g.
+
+Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
+{{"nom": "Big Mac", "calories": 240, "proteines_g": 12, "glucides_g": 19, "lipides_g": 12, "fibres_g": 2, "portion_g": 219, "portion_libelle": "1 sandwich"}}
+
+Règles :
+- Toutes les valeurs sont POUR 100 G, sauf portion_g.
+- Nomme l'aliment correctement, sans reprendre les fautes de la saisie.
+- Si le nom ne désigne aucun aliment identifiable, renvoie
+  {{"calories": 0}} : mieux vaut ne rien proposer qu'inventer."""
+
+        response = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=800,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        resultat = parser_json_claude(response, defaut={}, contexte="aliment-generique")
+    except Exception as e:
+        print(f"[aliment-generique] Claude indisponible : {e}")
+        raise HTTPException(status_code=502, detail="Recherche indisponible")
+
+    propre = {
+        "nom": str(resultat.get("nom") or nom).strip(),
+        "calories": _to_int(resultat.get("calories")),
+        "proteines_g": _to_int(resultat.get("proteines_g")),
+        "glucides_g": _to_int(resultat.get("glucides_g")),
+        "lipides_g": _to_int(resultat.get("lipides_g")),
+        "fibres_g": _to_int(resultat.get("fibres_g")),
+        "portion_g": _to_int(resultat.get("portion_g")),
+        "portion_libelle": str(resultat.get("portion_libelle") or "").strip(),
+    }
+
+    if propre["calories"] <= 0:
+        print(f"[aliment-generique] « {nom} » non identifié")
+        raise HTTPException(status_code=404, detail="Aliment non identifié")
+
+    # ---- 3. Mémoriser pour tout le monde --------------------------------
+    if engine:
+        session = Session()
+        try:
+            session.merge(AlimentGenerique(nom_normalise=cle, **propre,
+                                           nombre_demandes=1))
+            session.commit()
+            print(f"[aliment-generique] mémorisé : {propre['nom']} = "
+                  f"{propre['calories']} kcal/100 g, portion {propre['portion_g']} g")
+        except Exception as e:
+            session.rollback()
+            print(f"[aliment-generique] écriture impossible : {e}")
+        finally:
+            session.close()
+
+    propre["cache"] = False
+    return propre
+
+
+class AlimentPropose(Base):
+    """Aliment saisi à la main par un utilisateur, en attente de validation.
+
+    Séparé d'aliments_generiques : une saisie non vérifiée ne doit pas
+    servir aux autres utilisateurs. Elle est utilisable immédiatement par
+    celui qui l'a saisie, localement, mais n'entre dans la base commune
+    qu'après validation.
+    """
+    __tablename__ = "aliments_proposes"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    nom = Column(String, nullable=False)
+    nom_normalise = Column(String, nullable=False)
+    calories = Column(Integer, default=0)
+    proteines_g = Column(Integer, default=0)
+    glucides_g = Column(Integer, default=0)
+    lipides_g = Column(Integer, default=0)
+    fibres_g = Column(Integer, default=0)
+    portion_g = Column(Integer, default=0)
+    portion_libelle = Column(String, default="")
+    user_id = Column(String, default="")
+    statut = Column(String, default="pending")
+    date_soumission = Column(DateTime, default=datetime.utcnow)
+
+
+if engine:
+    Base.metadata.create_all(engine)
+
+
+class AlimentProposeRequest(BaseModel):
+    nom: str
+    calories: int
+    proteines_g: int = 0
+    glucides_g: int = 0
+    lipides_g: int = 0
+    fibres_g: int = 0
+    portion_g: int = 0
+    portion_libelle: str = ""
+    user_id: str = "anonymous"
+
+
+def envoyer_email_aliment(propose: "AlimentPropose"):
+    if not resend.api_key or not ADMIN_EMAIL:
+        print("⚠️ Email non configuré — validation impossible par courriel")
+        return
+
+    base = "https://web-production-c1f45.up.railway.app"
+    valider = f"{base}/admin/valider-aliment/{propose.id}"
+    rejeter = f"{base}/admin/rejeter-aliment/{propose.id}"
+
+    try:
+        resend.Emails.send({
+            "from": "nutriscan@resend.dev",
+            "to": ADMIN_EMAIL,
+            "subject": f"NutriScan — Nouvel aliment à valider : {propose.nom}",
+            "html": f"""
+            <h2>Nouvel aliment proposé</h2>
+            <p><strong>{propose.nom}</strong> — valeurs pour 100 g</p>
+            <table cellpadding="6" style="border-collapse:collapse">
+              <tr><td>Calories</td><td><strong>{propose.calories} kcal</strong></td></tr>
+              <tr><td>Protéines</td><td>{propose.proteines_g} g</td></tr>
+              <tr><td>Glucides</td><td>{propose.glucides_g} g</td></tr>
+              <tr><td>Lipides</td><td>{propose.lipides_g} g</td></tr>
+              <tr><td>Fibres</td><td>{propose.fibres_g} g</td></tr>
+              <tr><td>Portion</td><td>{propose.portion_g} g — {propose.portion_libelle or "non précisée"}</td></tr>
+            </table>
+            <p style="color:#666;font-size:13px">Proposé par {propose.user_id[:8]}…</p>
+            <br>
+            <a href="{valider}" style="background:#22c55e;color:white;padding:12px 24px;border-radius:6px;text-decoration:none;margin-right:12px">
+                ✅ Valider
+            </a>
+            <a href="{rejeter}" style="background:#ef4444;color:white;padding:12px 24px;border-radius:6px;text-decoration:none">
+                ❌ Rejeter
+            </a>
+            """
+        })
+        print(f"📧 Email envoyé pour l'aliment {propose.nom}")
+    except Exception as e:
+        print(f"❌ Erreur email : {e}")
+
+
+@app.post("/aliment-propose")
+async def aliment_propose(req: AlimentProposeRequest):
+    """Enregistre un aliment saisi à la main, en attente de validation."""
+    nom = (req.nom or "").strip()
+    if len(nom) < 3:
+        raise HTTPException(status_code=400, detail="Nom trop court")
+    if req.calories <= 0:
+        raise HTTPException(status_code=400, detail="Calories requises")
+    if not engine:
+        raise HTTPException(status_code=503, detail="Base de données indisponible")
+
+    session = Session()
+    try:
+        propose = AlimentPropose(
+            id=str(uuid.uuid4()),
+            nom=nom,
+            nom_normalise=normaliser_nom(nom),
+            calories=_to_int(req.calories),
+            proteines_g=_to_int(req.proteines_g),
+            glucides_g=_to_int(req.glucides_g),
+            lipides_g=_to_int(req.lipides_g),
+            fibres_g=_to_int(req.fibres_g),
+            portion_g=_to_int(req.portion_g),
+            portion_libelle=(req.portion_libelle or "").strip(),
+            user_id=req.user_id,
+            statut="pending",
+        )
+        session.add(propose)
+        session.commit()
+        session.refresh(propose)
+        envoyer_email_aliment(propose)
+        print(f"[aliment-propose] {nom} — {propose.calories} kcal/100 g, en attente")
+        return {"success": True, "id": propose.id,
+                "message": "Aliment enregistré. Il sera partagé après validation."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        session.close()
+
+
+@app.get("/admin/valider-aliment/{propose_id}", response_class=HTMLResponse)
+async def valider_aliment(propose_id: str):
+    if not engine:
+        return HTMLResponse("<h1>Base de données non disponible</h1>")
+    session = Session()
+    try:
+        p = session.query(AlimentPropose).filter(
+            AlimentPropose.id == propose_id).first()
+        if not p:
+            return HTMLResponse("<h1>❌ Proposition introuvable</h1>")
+        if p.statut != "pending":
+            return HTMLResponse(f"<h1>ℹ️ Déjà traitée ({p.statut})</h1>")
+
+        # merge : une proposition peut corriger un aliment déjà connu
+        session.merge(AlimentGenerique(
+            nom_normalise=p.nom_normalise,
+            nom=p.nom,
+            calories=p.calories,
+            proteines_g=p.proteines_g,
+            glucides_g=p.glucides_g,
+            lipides_g=p.lipides_g,
+            fibres_g=p.fibres_g,
+            portion_g=p.portion_g,
+            portion_libelle=p.portion_libelle,
+            nombre_demandes=1,
+        ))
+        p.statut = "validee"
+        session.commit()
+        return HTMLResponse(f"""<html><body style="font-family:sans-serif;padding:40px;text-align:center">
+        <h1>✅ Aliment validé</h1>
+        <p><strong>{p.nom}</strong> — {p.calories} kcal pour 100 g</p>
+        <p style="color:gray">Il est désormais disponible pour tous les utilisateurs.</p>
+        </body></html>""")
+    except Exception as e:
+        session.rollback()
+        return HTMLResponse(f"<h1>❌ Erreur : {str(e)}</h1>")
+    finally:
+        session.close()
+
+
+@app.get("/admin/rejeter-aliment/{propose_id}", response_class=HTMLResponse)
+async def rejeter_aliment(propose_id: str):
+    if not engine:
+        return HTMLResponse("<h1>Base de données non disponible</h1>")
+    session = Session()
+    try:
+        p = session.query(AlimentPropose).filter(
+            AlimentPropose.id == propose_id).first()
+        if not p:
+            return HTMLResponse("<h1>❌ Proposition introuvable</h1>")
+        p.statut = "rejetee"
+        session.commit()
+        return HTMLResponse(f"""<html><body style="font-family:sans-serif;padding:40px;text-align:center">
+        <h1>❌ Proposition rejetée</h1>
+        <p><strong>{p.nom}</strong> n'entrera pas dans la base commune.</p>
+        <p style="color:gray">L'utilisateur conserve sa saisie sur son appareil.</p>
+        </body></html>""")
+    finally:
+        session.close()
