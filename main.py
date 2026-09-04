@@ -1551,3 +1551,126 @@ async def rejeter_aliment(propose_id: str):
         </body></html>""")
     finally:
         session.close()
+
+
+class SuggererRepasRequest(BaseModel):
+    """Contexte pour proposer des repas.
+
+    Tout ce qui permet à Claude de proposer juste : ce qu'il y a dans le
+    frigo, ce qui a été mangé récemment (pour varier), ce qui reste à
+    consommer aujourd'hui (pour cadrer), et le moment de la journée.
+    """
+    aliments_frigo: list[str] = []
+    repas_recents: list[str] = []
+    categorie: str = "Déjeuner"
+    calories_restantes: int = 0
+    proteines_restantes: int = 0
+    glucides_restants: int = 0
+    lipides_restants: int = 0
+    age: int = 30
+    gender: str = "homme"
+    goal: str = "équilibré"
+    user_id: str = "anonymous"
+
+
+@app.post("/suggerer-repas")
+async def suggerer_repas(req: SuggererRepasRequest):
+    """Trois propositions de repas, structurées comme une analyse.
+
+    Même contrat que /analyze pour les ingrédients : nommés à la façon
+    de Ciqual, avec grammages et macros. C'est ce qui permet à l'app de
+    les résoudre localement et de les enregistrer comme n'importe quel
+    repas — modifiables, partageables, avec leur composition.
+    """
+    frigo = ", ".join(req.aliments_frigo) if req.aliments_frigo else "rien de renseigné"
+    recents = ", ".join(req.repas_recents) if req.repas_recents else "aucun"
+
+    # Sans budget restant, on cadre sur une portion raisonnable du moment
+    cible = req.calories_restantes if req.calories_restantes > 150 else {
+        "Petit-déjeuner": 450, "Déjeuner": 700, "Dîner": 600, "Collation": 200,
+    }.get(req.categorie, 600)
+
+    prompt = f"""Tu es un nutritionniste qui compose des repas concrets.
+
+CONTEXTE
+- Moment : {req.categorie}
+- Dans le frigo : {frigo}
+- Mangé ces derniers jours : {recents}
+- Profil : {req.gender}, {req.age} ans, objectif « {req.goal} »
+- Il reste aujourd'hui environ {cible} kcal
+  (protéines {req.proteines_restantes} g, glucides {req.glucides_restants} g,
+   lipides {req.lipides_restants} g)
+
+CONSIGNES
+1. Propose TROIS repas différents, adaptés au moment de la journée.
+2. Privilégie ce qu'il y a dans le frigo. Un ingrédient absent est
+   permis s'il est courant (huile, sel, un œuf), pas s'il faut aller
+   l'acheter.
+3. Évite de reproduire les repas récents : c'est la variété qu'on
+   cherche.
+4. Vise le budget restant sans le dépasser. Si les protéines manquent,
+   compense ; si les lipides sont déjà hauts, allège.
+5. Décompose chaque repas en INGRÉDIENTS, nommés comme dans la table
+   Ciqual de l'Anses : en français, génériques, avec l'état de cuisson.
+   « Riz blanc, cuit », « Blanc de poulet, rôti », « Huile d'olive ».
+   Les grammages doivent totaliser le poids du repas.
+
+Réponds UNIQUEMENT en JSON valide, sans backticks :
+{{"propositions": [
+  {{"nom": "Nom court du repas",
+    "description": "Une phrase : ce que c'est et pourquoi ça convient",
+    "poids_g": 420,
+    "score": 82,
+    "macros": {{"calories": 610, "proteines_g": 38, "glucides_g": 62, "lipides_g": 18}},
+    "ingredients": [
+      {{"nom": "Riz blanc, cuit", "grammes": 150, "calories": 195, "proteines_g": 4, "glucides_g": 42, "lipides_g": 0}}
+    ]
+  }}
+]}}"""
+
+    try:
+        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        response = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=2500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        brut = parser_json_claude(response, defaut={"propositions": []},
+                                  contexte="suggerer-repas")
+    except Exception as e:
+        print(f"[suggerer-repas] Claude indisponible : {e}")
+        raise HTTPException(status_code=502, detail="Suggestions indisponibles")
+
+    propositions = []
+    for p in (brut.get("propositions") or [])[:3]:
+        macros = p.get("macros") or {}
+        ingredients = []
+        for i in (p.get("ingredients") or []):
+            nom = str(i.get("nom") or "").strip()
+            if not nom:
+                continue
+            ingredients.append({
+                "nom": nom,
+                "grammes": _to_int(i.get("grammes")),
+                "calories": _to_int(i.get("calories")),
+                "proteines_g": _to_int(i.get("proteines_g")),
+                "glucides_g": _to_int(i.get("glucides_g")),
+                "lipides_g": _to_int(i.get("lipides_g")),
+            })
+        propositions.append({
+            "nom": str(p.get("nom") or "Repas").strip(),
+            "description": str(p.get("description") or "").strip(),
+            "poids_g": _to_int(p.get("poids_g")) or sum(i["grammes"] for i in ingredients),
+            "score": max(0, min(100, _to_int(p.get("score"), 70))),
+            "macros": {
+                "calories": _to_int(macros.get("calories")),
+                "proteines_g": _to_int(macros.get("proteines_g")),
+                "glucides_g": _to_int(macros.get("glucides_g")),
+                "lipides_g": _to_int(macros.get("lipides_g")),
+            },
+            "ingredients": ingredients,
+        })
+
+    print(f"[suggerer-repas] {len(propositions)} proposition(s) pour {req.categorie}, "
+          f"frigo {len(req.aliments_frigo)} article(s)")
+    return {"propositions": propositions}
