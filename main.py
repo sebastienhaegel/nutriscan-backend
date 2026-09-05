@@ -855,7 +855,9 @@ async def recipe_from_inventory(req: RecipeRequest):
         prompt = f"""Chef cuisinier spécialisé recettes simples. Aliments disponibles : {aliments_str}
 {consigne}
 Propose 3 recettes SIMPLES en JSON :
-{{"recettes": [{{"nom": "Nom", "description": "Description", "temps_minutes": 20, "ingredients_utilises": ["ing1"], "ingredients_manquants": ["ing2"]}}]}}
+{{"recettes": [{{"nom": "Nom", "description": "Description", "temps_minutes": 20, "ingredients_utilises": ["ing1"], "ingredients_manquants": ["ing2"], "quantites": [{{"nom": "ing1", "grammes": 150}}]}}]}}
+
+Pour "quantites" : le grammage de CHAQUE ingrédient utilisé, pour la recette entière (pas par personne). Un ingrédient en pièces — un œuf, une pomme — se note en grammes quand même (un œuf : 55 g, une pomme : 150 g).
 Règles : max 5 ingrédients, au moins 1 légume/fruit, moins de 20 minutes."""
         response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=2048, messages=[{"role": "user", "content": prompt}])
         return parser_json_claude(response, defaut={"recettes": []}, contexte="recipe")
