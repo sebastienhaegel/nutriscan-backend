@@ -909,8 +909,14 @@ async def scan_receipt(req: ScanReceiptRequest):
 [{"nom": "Produit", "quantite": "100g", "categorie": "Legumes"}]"""
         
         response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=4096,  # ✅ 1024 était trop court : le JSON était tronqué
+            model="claude-sonnet-4-5",
+            # Sonnet plutôt que Haiku : les libellés de caisse sont des codes
+            # — « 4TR JB S.C. LE TRANCHE FI », « BRK 1L PJ POMME FR CRF BI » —
+            # et les décoder demande une vraie connaissance des enseignes.
+            # Haiku suffisait pour Lidl, dont les noms sont presque en clair ;
+            # il rendait les armes sur Carrefour. Un ticket est scanné une
+            # fois par semaine : le surcoût est négligeable.
+            max_tokens=4096,
             messages=[{"role": "user", "content": prompt}]
         )
         
