@@ -1702,10 +1702,18 @@ Réponds UNIQUEMENT en JSON valide, sans backticks :
     return {"propositions": propositions}
 
 
+class AchatFrequent(BaseModel):
+    nom: str
+    occurrences: int = 1
+    jours_depuis_dernier: int = 0
+    derniere_quantite: str = ""
+
+
 class SuggererCoursesRequest(BaseModel):
     """Contexte pour proposer une liste de courses."""
     frigo: list[str] = []
     repas_recents: list[str] = []
+    achats: list[AchatFrequent] = []
     calories_moyennes: int = 0
     proteines_moyennes: int = 0
     glucides_moyens: int = 0
@@ -1732,6 +1740,15 @@ async def suggerer_courses(req: SuggererCoursesRequest):
     frigo = ", ".join(req.frigo) if req.frigo else "vide"
     recents = ", ".join(req.repas_recents) if req.repas_recents else "aucun repas enregistré"
 
+    if req.achats:
+        lignes = []
+        for a in sorted(req.achats, key=lambda x: -x.occurrences)[:40]:
+            q = f" ({a.derniere_quantite})" if a.derniere_quantite else ""
+            lignes.append(f"  {a.nom}{q} : {a.occurrences} fois, dernier achat il y a {a.jours_depuis_dernier} j")
+        historique = "\n".join(lignes)
+    else:
+        historique = "  aucun achat enregistré"
+
     ecart = ""
     if req.cible_calories > 0 and req.calories_moyennes > 0:
         ecart = f"""
@@ -1748,6 +1765,8 @@ CONTEXTE
   objectif « {req.goal} »
 - Au frigo aujourd'hui : {frigo}
 - Repas des deux dernières semaines : {recents}{ecart}
+- Historique d'achats des trois derniers mois (article : fréquence, ancienneté) :
+{historique}
 
 CONSIGNES
 1. Propose de 6 à 10 ARTICLES à acheter, pas plus. Une liste de courses
@@ -1755,21 +1774,39 @@ CONSIGNES
 2. Chaque article répond à un besoin précis, à dire en une phrase :
    « Il manque une source de fibres », « Aucun poisson gras ces deux
    dernières semaines », « Les légumes verts sont absents du frigo ».
-3. VARIÉTÉ : privilégie ce qui n'a PAS été mangé récemment et ce qui
-   N'EST PAS déjà au frigo. Ne propose pas ce qu'on a en quantité.
-4. ÉQUILIBRE : couvre les manques visibles — un macronutriment en
+3. L'HISTORIQUE D'ACHATS EST UN DIAGNOSTIC, PAS UNE LISTE À REPRODUIRE.
+   Ne propose JAMAIS de racheter ce qui est acheté souvent : la personne
+   y pensera seule, et le lui rappeler figerait ses habitudes. Utilise
+   l'historique pour repérer ce qui se RÉPÈTE trop — une famille
+   surreprésentée, un même produit chaque semaine — et propose une
+   SUBSTITUTION dans le même rôle : moins de charcuterie, un poisson ;
+   moins de biscuits, des fruits secs ; toujours le même féculent, un
+   autre.
+4. CE QUI EST MANGÉ COMPTE PLUS QUE CE QUI EST ACHETÉ. Les repas
+   enregistrés incluent ce qui est pris dehors ; le frigo et les achats,
+   non. Fonde l'équilibre d'abord sur les repas et sur l'écart aux
+   cibles, et sers-toi du frigo seulement pour ne pas proposer ce qu'on
+   a déjà.
+5. ÉQUILIBRE : couvre les manques visibles — un macronutriment en
    dessous de la cible, une famille absente (légumineuses, poisson,
    fruits, produits laitiers, céréales complètes).
-5. Reste RÉALISTE : des aliments de supermarché courants, pas des
+6. Reste RÉALISTE : des aliments de supermarché courants, pas des
    produits rares. Une quantité indicative pour le foyer et la semaine.
-6. Groupe par rayon : Fruits et légumes, Viandes et poissons, Produits
+7. Groupe par rayon : Fruits et légumes, Viandes et poissons, Produits
    laitiers, Épicerie, Boissons.
 
 Réponds UNIQUEMENT en JSON valide, sans backticks :
 {{"articles": [
+  {{"nom": "Pavés de saumon", "quantite": "2", "rayon": "Viandes et poissons",
+    "type": "substitution",
+    "raison": "Charcuterie achetée 8 fois en trois mois, jamais de poisson : à remplacer une fois sur deux."}},
   {{"nom": "Lentilles vertes", "quantite": "500 g", "rayon": "Épicerie",
+    "type": "nouveaute",
     "raison": "Aucune légumineuse ces deux dernières semaines ; fibres et protéines végétales."}}
-]}}"""
+]}}
+
+"type" vaut "substitution" (remplace quelque chose d'acheté trop
+souvent — dis quoi dans la raison) ou "nouveaute" (comble un manque)."""
 
     try:
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
@@ -1794,6 +1831,7 @@ Réponds UNIQUEMENT en JSON valide, sans backticks :
             "quantite": str(a.get("quantite") or "").strip(),
             "rayon": str(a.get("rayon") or "Épicerie").strip(),
             "raison": str(a.get("raison") or "").strip(),
+            "type": "substitution" if str(a.get("type") or "").startswith("sub") else "nouveaute",
         })
 
     print(f"[suggerer-courses] {len(articles)} article(s), frigo {len(req.frigo)}, "
