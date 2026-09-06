@@ -1579,6 +1579,7 @@ class SuggererRepasRequest(BaseModel):
     gender: str = "homme"
     goal: str = "équilibré"
     user_id: str = "anonymous"
+    nombre_personnes: int = 1
 
 
 @app.post("/suggerer-repas")
@@ -1601,6 +1602,7 @@ async def suggerer_repas(req: SuggererRepasRequest):
     prompt = f"""Tu es un nutritionniste qui compose des repas concrets.
 
 CONTEXTE
+- Pour : {req.nombre_personnes} personne(s)
 - Moment : {req.categorie}
 - Dans le frigo : {frigo}
 - Mangé ces derniers jours : {recents}
@@ -1611,17 +1613,33 @@ CONTEXTE
 
 CONSIGNES
 1. Propose TROIS repas différents, adaptés au moment de la journée.
-2. Privilégie ce qu'il y a dans le frigo. Un ingrédient absent est
-   permis s'il est courant (huile, sel, un œuf), pas s'il faut aller
-   l'acheter.
-3. Évite de reproduire les repas récents : c'est la variété qu'on
+2. SOBRIÉTÉ : de 3 à 5 ingrédients par repas, pas plus. Le frigo est
+   une réserve où PUISER, pas une liste à ÉPUISER. Un bon repas tient
+   en une protéine, un féculent ou légume, une matière grasse, et un
+   ou deux compléments. N'ajoute un ingrédient que s'il apporte quelque
+   chose que les autres n'apportent pas.
+3. Puise dans le frigo. Un ingrédient absent est permis s'il est
+   courant (huile, sel, un œuf), pas s'il faut aller l'acheter.
+4. Évite de reproduire les repas récents : c'est la variété qu'on
    cherche.
-4. Vise le budget restant sans le dépasser. Si les protéines manquent,
-   compense ; si les lipides sont déjà hauts, allège.
-5. Décompose chaque repas en INGRÉDIENTS, nommés comme dans la table
+5. ÉQUILIBRE avec peu d'éléments : vise les protéines, glucides et
+   lipides restants, et pense aux micronutriments — un légume coloré
+   ou un fruit couvre les vitamines mieux qu'un troisième féculent.
+   Vise le budget calorique restant sans le dépasser ; si les protéines
+   manquent, compense ; si les lipides sont déjà hauts, allège.
+6. PORTIONS réalistes, pour {req.nombre_personnes} personne(s). Une
+   part adulte fait 350 à 500 g au total ; multiplie par le nombre de
+   personnes, PAS PLUS. Pour une personne seule : 120 à 150 g de
+   protéine, 150 à 200 g de féculent cuit, 100 à 150 g de légumes, une
+   cuillère de matière grasse. Un plat à 800 g pour une personne est une
+   erreur, pas une générosité.
+7. Décompose chaque repas en INGRÉDIENTS, nommés comme dans la table
    Ciqual de l'Anses : en français, génériques, avec l'état de cuisson.
    « Riz blanc, cuit », « Blanc de poulet, rôti », « Huile d'olive ».
    Les grammages doivent totaliser le poids du repas.
+
+Les macros, le poids et les grammages d'ingrédients portent sur le
+TOTAL pour {req.nombre_personnes} personne(s).
 
 Réponds UNIQUEMENT en JSON valide, sans backticks :
 {{"propositions": [
@@ -1682,3 +1700,102 @@ Réponds UNIQUEMENT en JSON valide, sans backticks :
     print(f"[suggerer-repas] {len(propositions)} proposition(s) pour {req.categorie}, "
           f"frigo {len(req.aliments_frigo)} article(s)")
     return {"propositions": propositions}
+
+
+class SuggererCoursesRequest(BaseModel):
+    """Contexte pour proposer une liste de courses."""
+    frigo: list[str] = []
+    repas_recents: list[str] = []
+    calories_moyennes: int = 0
+    proteines_moyennes: int = 0
+    glucides_moyens: int = 0
+    lipides_moyens: int = 0
+    cible_calories: int = 0
+    cible_proteines: int = 0
+    cible_glucides: int = 0
+    cible_lipides: int = 0
+    nombre_personnes: int = 1
+    age: int = 30
+    gender: str = "homme"
+    goal: str = "équilibré"
+
+
+@app.post("/suggerer-courses")
+async def suggerer_courses(req: SuggererCoursesRequest):
+    """Une liste de courses pour équilibrer et varier.
+
+    Raisonne sur l'écart entre ce qui est mangé et ce qui devrait l'être,
+    et sur ce qui manque au frigo pour y remédier. Chaque article vient
+    avec sa raison — c'est elle qui rend la liste utile plutôt que
+    prescriptive.
+    """
+    frigo = ", ".join(req.frigo) if req.frigo else "vide"
+    recents = ", ".join(req.repas_recents) if req.repas_recents else "aucun repas enregistré"
+
+    ecart = ""
+    if req.cible_calories > 0 and req.calories_moyennes > 0:
+        ecart = f"""
+- Sur les deux dernières semaines, apports moyens par jour :
+  {req.calories_moyennes} kcal (cible {req.cible_calories}),
+  protéines {req.proteines_moyennes} g (cible {req.cible_proteines}),
+  glucides {req.glucides_moyens} g (cible {req.cible_glucides}),
+  lipides {req.lipides_moyens} g (cible {req.cible_lipides})"""
+
+    prompt = f"""Tu es un nutritionniste qui aide à faire ses courses.
+
+CONTEXTE
+- Foyer : {req.nombre_personnes} personne(s), profil {req.gender}, {req.age} ans,
+  objectif « {req.goal} »
+- Au frigo aujourd'hui : {frigo}
+- Repas des deux dernières semaines : {recents}{ecart}
+
+CONSIGNES
+1. Propose de 6 à 10 ARTICLES à acheter, pas plus. Une liste de courses
+   n'est pas un inventaire d'épicerie.
+2. Chaque article répond à un besoin précis, à dire en une phrase :
+   « Il manque une source de fibres », « Aucun poisson gras ces deux
+   dernières semaines », « Les légumes verts sont absents du frigo ».
+3. VARIÉTÉ : privilégie ce qui n'a PAS été mangé récemment et ce qui
+   N'EST PAS déjà au frigo. Ne propose pas ce qu'on a en quantité.
+4. ÉQUILIBRE : couvre les manques visibles — un macronutriment en
+   dessous de la cible, une famille absente (légumineuses, poisson,
+   fruits, produits laitiers, céréales complètes).
+5. Reste RÉALISTE : des aliments de supermarché courants, pas des
+   produits rares. Une quantité indicative pour le foyer et la semaine.
+6. Groupe par rayon : Fruits et légumes, Viandes et poissons, Produits
+   laitiers, Épicerie, Boissons.
+
+Réponds UNIQUEMENT en JSON valide, sans backticks :
+{{"articles": [
+  {{"nom": "Lentilles vertes", "quantite": "500 g", "rayon": "Épicerie",
+    "raison": "Aucune légumineuse ces deux dernières semaines ; fibres et protéines végétales."}}
+]}}"""
+
+    try:
+        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        response = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=1500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        brut = parser_json_claude(response, defaut={"articles": []},
+                                  contexte="suggerer-courses")
+    except Exception as e:
+        print(f"[suggerer-courses] Claude indisponible : {e}")
+        raise HTTPException(status_code=502, detail="Suggestions indisponibles")
+
+    articles = []
+    for a in (brut.get("articles") or [])[:10]:
+        nom = str(a.get("nom") or "").strip()
+        if not nom:
+            continue
+        articles.append({
+            "nom": nom,
+            "quantite": str(a.get("quantite") or "").strip(),
+            "rayon": str(a.get("rayon") or "Épicerie").strip(),
+            "raison": str(a.get("raison") or "").strip(),
+        })
+
+    print(f"[suggerer-courses] {len(articles)} article(s), frigo {len(req.frigo)}, "
+          f"repas {len(req.repas_recents)}")
+    return {"articles": articles}
