@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -1837,3 +1837,74 @@ souvent — dis quoi dans la raison) ou "nouveaute" (comble un manque)."""
     print(f"[suggerer-courses] {len(articles)} article(s), frigo {len(req.frigo)}, "
           f"repas {len(req.repas_recents)}")
     return {"articles": articles}
+
+
+class AlimentImport(BaseModel):
+    """Une ligne d'import : valeurs PAR PORTION, telles que les chaînes
+    les publient. Converties en 100 g à l'entrée."""
+    nom: str
+    portion_g: int
+    portion_libelle: str = ""
+    calories: int
+    proteines_g: int = 0
+    glucides_g: int = 0
+    lipides_g: int = 0
+    fibres_g: int = 0
+
+
+class ImportAlimentsRequest(BaseModel):
+    aliments: list[AlimentImport]
+    remplacer: bool = True
+
+
+@app.post("/admin/importer-aliments")
+async def importer_aliments(req: ImportAlimentsRequest,
+                            x_admin_secret: str = Header(default="")):
+    """Import en lot dans le cache partagé, réservé à l'administrateur.
+
+    Protégé par un secret d'en-tête (variable ADMIN_SECRET sur Railway) :
+    cette route écrit directement, sans validation par courriel — c'est
+    l'administrateur qui importe des données déjà vérifiées.
+
+    Chaque ligne arrive par portion et est ramenée à 100 g, comme tout
+    ce que contient la table. La portion elle-même est conservée : c'est
+    elle que l'app proposera par défaut.
+    """
+    attendu = os.environ.get("ADMIN_SECRET", "")
+    if not attendu or x_admin_secret != attendu:
+        raise HTTPException(status_code=403, detail="Accès refusé")
+    if not SessionLocal:
+        raise HTTPException(status_code=503, detail="Base indisponible")
+
+    db = SessionLocal()
+    importes, ignores = 0, 0
+    try:
+        for a in req.aliments:
+            nom = a.nom.strip()
+            if len(nom) < 3 or a.portion_g <= 0:
+                ignores += 1
+                continue
+            f = 100.0 / a.portion_g
+            cle = normaliser_nom(nom)
+            existant = db.get(AlimentGenerique, cle)
+            if existant and not req.remplacer:
+                ignores += 1
+                continue
+            ligne = existant or AlimentGenerique(nom_normalise=cle)
+            ligne.nom = nom
+            ligne.calories = round(a.calories * f)
+            ligne.proteines_g = round(a.proteines_g * f)
+            ligne.glucides_g = round(a.glucides_g * f)
+            ligne.lipides_g = round(a.lipides_g * f)
+            ligne.fibres_g = round(a.fibres_g * f)
+            ligne.portion_g = a.portion_g
+            ligne.portion_libelle = a.portion_libelle.strip()
+            if not existant:
+                db.add(ligne)
+            importes += 1
+        db.commit()
+    finally:
+        db.close()
+
+    print(f"[importer-aliments] {importes} importé(s), {ignores} ignoré(s)")
+    return {"importes": importes, "ignores": ignores}
