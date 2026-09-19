@@ -1873,10 +1873,12 @@ async def importer_aliments(req: ImportAlimentsRequest,
     attendu = os.environ.get("ADMIN_SECRET", "")
     if not attendu or x_admin_secret != attendu:
         raise HTTPException(status_code=403, detail="Accès refusé")
-    if not SessionLocal:
+    if not engine:
         raise HTTPException(status_code=503, detail="Base indisponible")
 
-    db = SessionLocal()
+    # `Session`, comme partout ailleurs dans ce fichier — pas
+    # `SessionLocal`, un nom que j'avais supposé.
+    db = Session()
     importes, ignores = 0, 0
     try:
         for a in req.aliments:
