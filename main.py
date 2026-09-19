@@ -1886,7 +1886,10 @@ async def importer_aliments(req: ImportAlimentsRequest,
                 continue
             f = 100.0 / a.portion_g
             cle = normaliser_nom(nom)
-            existant = db.get(AlimentGenerique, cle)
+            # Même forme que /aliment-generique : `Session.get` n'existe
+            # que depuis SQLAlchemy 1.4, et c'est lui qui rendait 500.
+            existant = db.query(AlimentGenerique).filter(
+                AlimentGenerique.nom_normalise == cle).first()
             if existant and not req.remplacer:
                 ignores += 1
                 continue
@@ -1903,6 +1906,11 @@ async def importer_aliments(req: ImportAlimentsRequest,
                 db.add(ligne)
             importes += 1
         db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"[importer-aliments] ERREUR : {type(e).__name__}: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Import échoué : {type(e).__name__}")
     finally:
         db.close()
 
