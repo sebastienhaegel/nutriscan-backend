@@ -408,7 +408,180 @@ def parser_json_claude(response, defaut=None, contexte=""):
 @app.get("/")
 def root():
     return {"message": "NutriScan API v1", "status": "running"}
-
+from datetime import date as _date, timedelta as _timedelta
+from fastapi import Query
+ 
+ 
+class ClassementSemaine(Base):
+    __tablename__ = "classement_assiduite"
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False, index=True)      # appareil anonyme
+    profil_id = Column(String, nullable=False, index=True)    # UUID du profil
+    pseudo = Column(String, default="")
+    semaine = Column(String, nullable=False, index=True)      # lundi, "2026-09-21"
+    points = Column(Integer, default=0)
+    repas = Column(Integer, default=0)
+    jours_complets = Column(Integer, default=0)
+    semaine_complete = Column(Boolean, default=False)
+    maj = Column(DateTime, default=datetime.utcnow)
+ 
+ 
+# create_all est idempotent : rappel ici pour que la table existe quel
+# que soit l'endroit où ce bloc est collé.
+if engine:
+    Base.metadata.create_all(engine)
+ 
+ 
+class ScoreSemaineEntrant(BaseModel):
+    profil_id: str
+    pseudo: str = ""
+    semaine: str
+    points: int = 0
+    repas: int = 0
+    jours_complets: int = 0
+    semaine_complete: bool = False
+ 
+ 
+class PublierClassementRequest(BaseModel):
+    user_id: str
+    semaines: list[ScoreSemaineEntrant]
+ 
+ 
+def _lundi(d: _date) -> _date:
+    return d - _timedelta(days=d.weekday())
+ 
+ 
+def _semaine_valide(texte: str) -> bool:
+    try:
+        d = _date.fromisoformat(texte)
+    except ValueError:
+        return False
+    # Un lundi, pas dans le futur
+    return d.weekday() == 0 and d <= _lundi(_date.today())
+ 
+ 
+@app.post("/classement/publier")
+def publier_classement(req: PublierClassementRequest):
+    """Enregistre ou met à jour les bilans hebdomadaires d'un appareil."""
+    if not engine:
+        raise HTTPException(status_code=503, detail="Base de données non disponible")
+    if not req.user_id or len(req.semaines) > 60:
+        raise HTTPException(status_code=400, detail="Requête invalide")
+ 
+    db = Session()
+    enregistres = 0
+    try:
+        for s in req.semaines:
+            if not _semaine_valide(s.semaine):
+                continue
+            # Bornes de bon sens : 4 repas × 7 jours × 10 + 7 × 15 + 50
+            points = max(0, min(int(s.points), 500))
+            repas = max(0, min(int(s.repas), 60))
+            jours = max(0, min(int(s.jours_complets), 7))
+            pseudo = (s.pseudo or "").strip()[:24]
+ 
+            ligne = db.query(ClassementSemaine).filter(
+                ClassementSemaine.user_id == req.user_id,
+                ClassementSemaine.profil_id == s.profil_id,
+                ClassementSemaine.semaine == s.semaine,
+            ).first()
+ 
+            if ligne is None:
+                ligne = ClassementSemaine(
+                    user_id=req.user_id,
+                    profil_id=s.profil_id,
+                    semaine=s.semaine,
+                )
+                db.add(ligne)
+ 
+            ligne.pseudo = pseudo
+            ligne.points = points
+            ligne.repas = repas
+            ligne.jours_complets = jours
+            ligne.semaine_complete = bool(s.semaine_complete) and jours == 7
+            ligne.maj = datetime.utcnow()
+            enregistres += 1
+ 
+        db.commit()
+        return {"enregistres": enregistres}
+    except Exception as e:
+        db.rollback()
+        print(f"[classement] ERREUR publication : {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+ 
+ 
+@app.get("/classement")
+def classement(
+    periode: str = Query("semaine"),
+    user_id: str = Query(""),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """Palmarès de tous les utilisateurs sur la période.
+ 
+    periode : "semaine" (semaine civile en cours), "mois" (semaines dont
+    le lundi tombe dans le mois en cours), "total" (tout l'historique).
+    """
+    if not engine:
+        raise HTTPException(status_code=503, detail="Base de données non disponible")
+ 
+    aujourd_hui = _date.today()
+    if periode == "semaine":
+        debut = _lundi(aujourd_hui).isoformat()
+    elif periode == "mois":
+        debut = aujourd_hui.replace(day=1).isoformat()
+    else:
+        periode = "total"
+        debut = None
+ 
+    db = Session()
+    try:
+        requete = db.query(ClassementSemaine)
+        if debut:
+            requete = requete.filter(ClassementSemaine.semaine >= debut)
+        lignes = requete.all()
+    finally:
+        db.close()
+ 
+    # Agrégation par (appareil, profil)
+    cumul: dict[tuple[str, str], dict] = {}
+    for l in lignes:
+        cle = (l.user_id, l.profil_id)
+        c = cumul.setdefault(cle, {
+            "user_id": l.user_id,
+            "profil_id": l.profil_id,
+            "pseudo": l.pseudo or "",
+            "points": 0,
+            "repas": 0,
+            "jours_complets": 0,
+            "semaines_completes": 0,
+            "_maj": l.maj,
+        })
+        c["points"] += l.points or 0
+        c["repas"] += l.repas or 0
+        c["jours_complets"] += l.jours_complets or 0
+        c["semaines_completes"] += 1 if l.semaine_complete else 0
+        # Le pseudo le plus récent l'emporte
+        if l.maj and c["_maj"] and l.maj >= c["_maj"]:
+            c["pseudo"] = l.pseudo or ""
+            c["_maj"] = l.maj
+ 
+    tableau = sorted(
+        cumul.values(),
+        key=lambda c: (-c["points"], -c["jours_complets"], c["pseudo"].lower()),
+    )
+    for rang, c in enumerate(tableau, start=1):
+        c["rang"] = rang
+        c.pop("_maj", None)
+ 
+    return {
+        "periode": periode,
+        "participants": len(tableau),
+        "classement": tableau[:limit],
+        "moi": [c for c in tableau if user_id and c["user_id"] == user_id],
+    }
+ 
 @app.get("/health")
 def health():
     return {"status": "healthy", "service": "nutriscan", "version": "1.0.0"}
