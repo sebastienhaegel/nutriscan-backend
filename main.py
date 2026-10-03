@@ -190,6 +190,23 @@ def _to_int(valeur, defaut=0):
         return defaut
 
 
+def _to_int_ou_none(valeur):
+    """Comme _to_int, mais None reste None.
+
+    Pour les nutriments secondaires (sucres, saturés, fibres), l'absence
+    de donnée et le zéro sont deux informations différentes : une viande
+    a 0 g de sucre, une fiche incomplète n'en sait rien. Swift lit un
+    null JSON comme nil et affiche « non renseigné », là où un 0 serait
+    pris pour une mesure.
+    """
+    if valeur is None or isinstance(valeur, bool):
+        return None
+    texte = str(valeur).strip()
+    if texte == "" or texte.lower() in ("null", "none", "nan", "?", "-"):
+        return None
+    return _to_int(valeur, defaut=None)
+
+
 def normaliser_resultat(result: dict) -> dict:
     """Garantit que tous les champs numériques sont des entiers (Swift attend des Int)."""
     if not isinstance(result, dict):
@@ -207,6 +224,10 @@ def normaliser_resultat(result: dict) -> dict:
         "proteines_g": _to_int(macros.get("proteines_g")),
         "glucides_g": _to_int(macros.get("glucides_g")),
         "lipides_g": _to_int(macros.get("lipides_g")),
+        # Secondaires : null si Claude ne les a pas donnés.
+        "sucres_g": _to_int_ou_none(macros.get("sucres_g")),
+        "ag_satures_g": _to_int_ou_none(macros.get("ag_satures_g")),
+        "fibres_g": _to_int_ou_none(macros.get("fibres_g")),
     }
 
     nutrients = result.get("nutrients") or []
@@ -234,6 +255,9 @@ def normaliser_resultat(result: dict) -> dict:
             "proteines_g": _to_int(i.get("proteines_g")),
             "glucides_g": _to_int(i.get("glucides_g")),
             "lipides_g": _to_int(i.get("lipides_g")),
+            "sucres_g": _to_int_ou_none(i.get("sucres_g")),
+            "ag_satures_g": _to_int_ou_none(i.get("ag_satures_g")),
+            "fibres_g": _to_int_ou_none(i.get("fibres_g")),
         }
         for i in ingredients
         if isinstance(i, dict) and str(i.get("nom", "")).strip()
@@ -836,7 +860,7 @@ Profil : {req.gender}, {req.age} ans, {req.weight} kg, objectif: {req.goal}.
 Poids total du plat servi sur la photo : {req.poids_plat} grammes.
 {indication_plat}
 Retourne exactement ce format JSON :
-{{"nom": "Nom du plat identifié", "description": "Description courte (1-2 phrases)", "score": 72, "verdict": "Titre du bilan", "commentaire": "Commentaire personnalisé (2-3 phrases)", "macros": {{"calories": 650, "proteines_g": 35, "glucides_g": 70, "lipides_g": 22}}, "ingredients": [{{"nom": "Riz blanc cuit", "grammes": 150, "calories": 195, "proteines_g": 4, "glucides_g": 42, "lipides_g": 1}}, {{"nom": "Poulet, blanc, cuit", "grammes": 120, "calories": 180, "proteines_g": 36, "glucides_g": 0, "lipides_g": 4}}], "nutrients": [{{"nom": "Protéines", "pct": 65, "niveau": "medium"}}, {{"nom": "Glucides", "pct": 85, "niveau": "good"}}, {{"nom": "Lipides", "pct": 45, "niveau": "low"}}, {{"nom": "Fibres", "pct": 30, "niveau": "low"}}, {{"nom": "Vitamines", "pct": 70, "niveau": "medium"}}, {{"nom": "Minéraux", "pct": 55, "niveau": "medium"}}], "conseils": ["Conseil 1", "Conseil 2", "Conseil 3"]}}
+{{"nom": "Nom du plat identifié", "description": "Description courte (1-2 phrases)", "score": 72, "verdict": "Titre du bilan", "commentaire": "Commentaire personnalisé (2-3 phrases)", "macros": {{"calories": 650, "proteines_g": 35, "glucides_g": 70, "lipides_g": 22, "sucres_g": 6, "ag_satures_g": 5, "fibres_g": 7}}, "ingredients": [{{"nom": "Riz blanc cuit", "grammes": 150, "calories": 195, "proteines_g": 4, "glucides_g": 42, "lipides_g": 1, "sucres_g": 0, "ag_satures_g": 0, "fibres_g": 1}}, {{"nom": "Poulet, blanc, cuit", "grammes": 120, "calories": 180, "proteines_g": 36, "glucides_g": 0, "lipides_g": 4, "sucres_g": 0, "ag_satures_g": 1, "fibres_g": 0}}], "nutrients": [{{"nom": "Protéines", "pct": 65, "niveau": "medium"}}, {{"nom": "Glucides", "pct": 85, "niveau": "good"}}, {{"nom": "Lipides", "pct": 45, "niveau": "low"}}, {{"nom": "Fibres", "pct": 30, "niveau": "low"}}, {{"nom": "Vitamines", "pct": 70, "niveau": "medium"}}, {{"nom": "Minéraux", "pct": 55, "niveau": "medium"}}], "conseils": ["Conseil 1", "Conseil 2", "Conseil 3"]}}
 
 RÈGLES POUR « ingredients » :
 - Décompose le plat en 2 à 8 ingrédients principaux, du plus lourd au plus léger.
@@ -852,6 +876,15 @@ RÈGLES POUR « ingredients » :
   Elles servent de valeur de repli quand l'ingrédient reste introuvable
   dans la base.
 - La somme des macros des ingrédients doit rester cohérente avec « macros ».
+
+RÈGLES POUR « sucres_g », « ag_satures_g », « fibres_g » (dans « macros » ET
+dans chaque ingrédient) :
+- sucres_g = sucres totaux (dont ceux des fruits et du lait), en grammes.
+- ag_satures_g = acides gras saturés, en grammes.
+- fibres_g = fibres alimentaires, en grammes.
+- Ce sont des valeurs de la table Ciqual de l'Anses : donne-les pour
+  chaque ingrédient, 0 quand l'aliment n'en contient pas (une viande n'a
+  pas de sucre). Ne mets null que si tu ne peux vraiment pas estimer.
 
 Les valeurs macros doivent correspondre au poids total de {req.poids_plat}g."""
         response = client.messages.create(model="claude-sonnet-4-5", max_tokens=3000, messages=[{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": req.image_base64}}, {"type": "text", "text": prompt}]}])
@@ -1346,7 +1379,7 @@ Si l'étiquette ne donne que les valeurs par portion, convertis-les pour
 100 g et indique la masse de la portion dans « portion_g ».
 
 Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
-{"nom": "Whey Native", "marque": "Nutripure", "quantite": "900 g", "categorie": "Épicerie", "calories": 380, "proteines_g": 78, "glucides_g": 5, "lipides_g": 4, "portion_g": 30, "converti": false, "lisible": true}
+{"nom": "Whey Native", "marque": "Nutripure", "quantite": "900 g", "categorie": "Épicerie", "calories": 380, "proteines_g": 78, "glucides_g": 5, "lipides_g": 4, "sucres_g": 3, "ag_satures_g": 2, "fibres_g": 0, "portion_g": 30, "converti": false, "lisible": true}
 
 Règles :
 - "categorie" parmi : "Boissons", "Produits laitiers", "Viandes/Poissons",
@@ -1355,7 +1388,11 @@ Règles :
 - "portion_g" vaut 0 si l'étiquette n'indique aucune portion.
 - Si le tableau est illisible ou absent, renvoie "lisible": false et des
   valeurs à 0 : mieux vaut ne rien proposer qu'un chiffre inventé.
-- N'invente jamais une valeur absente de l'étiquette : mets 0."""
+- N'invente jamais une valeur absente de l'étiquette : mets 0.
+- "sucres_g" est la ligne « dont sucres », "ag_satures_g" la ligne « dont
+  acides gras saturés », "fibres_g" la ligne « fibres ». Si l'une de ces
+  trois lignes est ABSENTE du tableau, mets null (pas 0) pour celle-là :
+  l'app distingue « non indiqué » de « zéro »."""
 
         response = client.messages.create(
             model="claude-sonnet-4-5",
@@ -1381,6 +1418,9 @@ Règles :
             "proteines_g": _to_int(resultat.get("proteines_g")),
             "glucides_g": _to_int(resultat.get("glucides_g")),
             "lipides_g": _to_int(resultat.get("lipides_g")),
+            "sucres_g": _to_int_ou_none(resultat.get("sucres_g")),
+            "ag_satures_g": _to_int_ou_none(resultat.get("ag_satures_g")),
+            "fibres_g": _to_int_ou_none(resultat.get("fibres_g")),
             "portion_g": _to_int(resultat.get("portion_g")),
             "converti": bool(resultat.get("converti", False)),
             "lisible": bool(resultat.get("lisible", True)),
@@ -1417,6 +1457,11 @@ class AlimentGenerique(Base):
     glucides_g = Column(Integer, default=0)
     lipides_g = Column(Integer, default=0)
     fibres_g = Column(Integer, default=0)
+    # Nullable, et non « 0 par défaut » : une ligne mise en cache avant
+    # l'ajout de ces colonnes ne sait pas, et sera recomplétée par Claude
+    # à la prochaine demande (voir /aliment-generique).
+    sucres_g = Column(Integer, nullable=True)
+    ag_satures_g = Column(Integer, nullable=True)
     portion_g = Column(Integer, default=0)
     portion_libelle = Column(String, default="")
     date_creation = Column(DateTime, default=datetime.utcnow)
@@ -1425,6 +1470,15 @@ class AlimentGenerique(Base):
 
 if engine:
     Base.metadata.create_all(engine)
+    # create_all ne modifie JAMAIS une table existante : les colonnes
+    # ajoutées après coup doivent l'être à la main. Idempotent.
+    try:
+        from sqlalchemy import text as _text
+        with engine.begin() as conn:
+            conn.execute(_text("ALTER TABLE aliments_generiques ADD COLUMN IF NOT EXISTS sucres_g INTEGER"))
+            conn.execute(_text("ALTER TABLE aliments_generiques ADD COLUMN IF NOT EXISTS ag_satures_g INTEGER"))
+    except Exception as e:
+        print(f"[aliments_generiques] migration impossible : {e}")
 
 
 class AlimentGeneriqueRequest(BaseModel):
@@ -1460,6 +1514,12 @@ async def aliment_generique(req: AlimentGeneriqueRequest, force: bool = False):
         try:
             connu = session.query(AlimentGenerique).filter(
                 AlimentGenerique.nom_normalise == cle).first()
+            # Une ligne d'avant les sucres/saturés est incomplète : on
+            # laisse Claude la recompléter une fois, puis elle est à jour
+            # pour tout le monde.
+            if connu and connu.sucres_g is None:
+                print(f"[aliment-generique] cache incomplet pour {connu.nom} — recomplété")
+                connu = None
             if connu:
                 connu.nombre_demandes += 1
                 session.commit()
@@ -1471,6 +1531,8 @@ async def aliment_generique(req: AlimentGeneriqueRequest, force: bool = False):
                     "glucides_g": connu.glucides_g,
                     "lipides_g": connu.lipides_g,
                     "fibres_g": connu.fibres_g,
+                    "sucres_g": connu.sucres_g,
+                    "ag_satures_g": connu.ag_satures_g,
                     "portion_g": connu.portion_g,
                     "portion_libelle": connu.portion_libelle or "",
                     "cache": True,
@@ -1498,10 +1560,13 @@ est réellement servie. Un Big Mac pèse environ 219 g, un bol de bo bun
 environ 450 g.
 
 Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
-{{"nom": "Big Mac", "calories": 240, "proteines_g": 12, "glucides_g": 19, "lipides_g": 12, "fibres_g": 2, "portion_g": 219, "portion_libelle": "1 sandwich"}}
+{{"nom": "Big Mac", "calories": 240, "proteines_g": 12, "glucides_g": 19, "lipides_g": 12, "fibres_g": 2, "sucres_g": 4, "ag_satures_g": 4, "portion_g": 219, "portion_libelle": "1 sandwich"}}
 
 Règles :
 - Toutes les valeurs sont POUR 100 G, sauf portion_g.
+- sucres_g = sucres totaux, ag_satures_g = acides gras saturés, fibres_g =
+  fibres alimentaires, en grammes. Donne-les systématiquement (0 si
+  l'aliment n'en contient pas) : ils servent aux plafonds de l'OMS.
 - Nomme l'aliment correctement, sans reprendre les fautes de la saisie.
 - Si le nom ne désigne aucun aliment identifiable, renvoie
   {{"calories": 0}} : mieux vaut ne rien proposer qu'inventer."""
@@ -1523,6 +1588,10 @@ Règles :
         "glucides_g": _to_int(resultat.get("glucides_g")),
         "lipides_g": _to_int(resultat.get("lipides_g")),
         "fibres_g": _to_int(resultat.get("fibres_g")),
+        # 0 si Claude n'a rien dit : il a été prié de toujours répondre, et
+        # une ligne « None » resterait un cache incomplet, redemandé sans fin.
+        "sucres_g": _to_int(resultat.get("sucres_g")),
+        "ag_satures_g": _to_int(resultat.get("ag_satures_g")),
         "portion_g": _to_int(resultat.get("portion_g")),
         "portion_libelle": str(resultat.get("portion_libelle") or "").strip(),
     }
@@ -2023,6 +2092,10 @@ class AlimentImport(BaseModel):
     glucides_g: int = 0
     lipides_g: int = 0
     fibres_g: int = 0
+    # Facultatifs : absents du CSV, la ligne reste « incomplète » et
+    # Claude la complétera à la première demande.
+    sucres_g: int | None = None
+    ag_satures_g: int | None = None
 
 
 class ImportAlimentsRequest(BaseModel):
@@ -2075,6 +2148,8 @@ async def importer_aliments(req: ImportAlimentsRequest,
             ligne.glucides_g = round(a.glucides_g * f)
             ligne.lipides_g = round(a.lipides_g * f)
             ligne.fibres_g = round(a.fibres_g * f)
+            ligne.sucres_g = round(a.sucres_g * f) if a.sucres_g is not None else None
+            ligne.ag_satures_g = round(a.ag_satures_g * f) if a.ag_satures_g is not None else None
             ligne.portion_g = a.portion_g
             ligne.portion_libelle = a.portion_libelle.strip()
             if not existant:
