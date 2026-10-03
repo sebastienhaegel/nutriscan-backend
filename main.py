@@ -50,6 +50,11 @@ class PlatPartage(Base):
     valide = Column(Boolean, default=True)
     date_creation = Column(DateTime, default=datetime.utcnow)
     nombre_utilisations = Column(Integer, default=1)
+    # Pour la PORTION décrite par les macros, comme elles. Nullables :
+    # inconnu ≠ 0. Complétés par /admin/completer-aliments.
+    sucres_g = Column(Integer, nullable=True)
+    ag_satures_g = Column(Integer, nullable=True)
+    fibres_g = Column(Integer, nullable=True)
 
 class CorrectionPending(Base):
     __tablename__ = "corrections_pending"
@@ -326,6 +331,10 @@ def sauvegarder_plat_partage(result: dict):
             plat_existant.glucides_g = macros.get("glucides_g", plat_existant.glucides_g)
             plat_existant.lipides_g = macros.get("lipides_g", plat_existant.lipides_g)
             plat_existant.score = result.get("score", plat_existant.score)
+            # Jamais une valeur connue remplacée par une inconnue.
+            if macros.get("sucres_g") is not None: plat_existant.sucres_g = macros["sucres_g"]
+            if macros.get("ag_satures_g") is not None: plat_existant.ag_satures_g = macros["ag_satures_g"]
+            if macros.get("fibres_g") is not None: plat_existant.fibres_g = macros["fibres_g"]
             plat_existant.nombre_utilisations += 1
             session.commit()
             print(f"🔄 Plat mis à jour dans base partagée : {nom}")
@@ -338,6 +347,9 @@ def sauvegarder_plat_partage(result: dict):
                 proteines_g=macros.get("proteines_g", 0),
                 glucides_g=macros.get("glucides_g", 0),
                 lipides_g=macros.get("lipides_g", 0),
+                sucres_g=macros.get("sucres_g"),
+                ag_satures_g=macros.get("ag_satures_g"),
+                fibres_g=macros.get("fibres_g"),
                 score=result.get("score", 0),
                 verdict=result.get("verdict", ""),
                 commentaire=result.get("commentaire", ""),
@@ -606,6 +618,174 @@ def classement(
         "moi": [c for c in tableau if user_id and c["user_id"] == user_id],
     }
  
+
+# =====================================================================
+# Sucres, saturés, fibres : estimation en lot, et complétion de l'existant
+#
+# Une seule fonction d'estimation, utilisée par trois chemins :
+#   • POST /estimer-secondaires      — l'app complète ses plats perso
+#   • POST /admin/completer-aliments — l'administrateur complète les
+#     tables partagées (aliments_generiques pour 100 g, plats_partages
+#     pour la portion)
+# Jusqu'à 30 aliments par appel Claude : un prompt, une réponse JSON,
+# des valeurs cohérentes entre elles.
+# =====================================================================
+
+class AlimentAEstimer(BaseModel):
+    nom: str
+    calories: int = 0
+    proteines_g: int = 0
+    glucides_g: int = 0
+    lipides_g: int = 0
+    # Masse à laquelle les macros correspondent. 0 = inconnue : les
+    # valeurs rendues portent alors « sur la portion décrite ».
+    poids_g: int = 100
+
+
+class EstimerSecondairesRequest(BaseModel):
+    aliments: list[AlimentAEstimer]
+
+
+def estimer_secondaires(aliments: list[dict]) -> list[dict | None]:
+    """Pour chaque aliment, {sucres_g, ag_satures_g, fibres_g} entiers,
+    pour la masse `poids_g` indiquée — ou None si Claude n'a rien rendu
+    d'exploitable pour cet indice."""
+    if not aliments:
+        return []
+    lignes = []
+    for i, a in enumerate(aliments):
+        masse = f"pour {a['poids_g']} g" if a.get("poids_g") else "pour la portion décrite"
+        lignes.append(f"{i}. {a['nom']} — {masse} : {a.get('calories', 0)} kcal, "
+                      f"{a.get('proteines_g', 0)} g protéines, {a.get('glucides_g', 0)} g glucides, "
+                      f"{a.get('lipides_g', 0)} g lipides")
+    prompt = f"""Pour chacun des aliments ou plats ci-dessous, estime les SUCRES TOTAUX,
+les ACIDES GRAS SATURÉS et les FIBRES, en grammes, POUR LA MASSE INDIQUÉE
+(pas pour 100 g, sauf si la masse indiquée est 100 g).
+
+Les macros fournies sont celles de cette masse : tes valeurs doivent
+rester cohérentes avec elles (sucres ≤ glucides, saturés ≤ lipides).
+Appuie-toi sur la table Ciqual de l'Anses, ou sur les valeurs du
+fabricant pour un produit de marque.
+
+{chr(10).join(lignes)}
+
+Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown), une
+entrée par indice, dans l'ordre :
+{{"resultats": [{{"i": 0, "sucres_g": 4, "ag_satures_g": 2, "fibres_g": 3}}, ...]}}
+
+Donne un nombre pour chaque aliment, 0 quand il n'en contient pas (une
+viande n'a pas de sucre). Ne saute aucun indice."""
+    client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+    response = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=2500,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    brut = parser_json_claude(response, defaut={}, contexte="estimer-secondaires")
+    par_indice: dict[int, dict] = {}
+    for r in (brut.get("resultats") or []):
+        if not isinstance(r, dict):
+            continue
+        i = _to_int(r.get("i"), defaut=-1)
+        if 0 <= i < len(aliments):
+            a = aliments[i]
+            par_indice[i] = {
+                "sucres_g": max(0, min(_to_int(r.get("sucres_g")), max(0, a.get("glucides_g", 0)) or 9999)),
+                "ag_satures_g": max(0, min(_to_int(r.get("ag_satures_g")), max(0, a.get("lipides_g", 0)) or 9999)),
+                "fibres_g": max(0, _to_int(r.get("fibres_g"))),
+            }
+    return [par_indice.get(i) for i in range(len(aliments))]
+
+
+@app.post("/estimer-secondaires")
+async def estimer_secondaires_route(req: EstimerSecondairesRequest):
+    """L'app envoie ses plats sans détail, par paquets de 30 au plus."""
+    aliments = [a.model_dump() for a in req.aliments][:30]
+    if not aliments:
+        return {"resultats": []}
+    try:
+        resultats = estimer_secondaires(aliments)
+    except Exception as e:
+        print(f"[estimer-secondaires] Claude indisponible : {e}")
+        raise HTTPException(status_code=502, detail="Estimation indisponible")
+    print(f"[estimer-secondaires] {sum(r is not None for r in resultats)}/{len(aliments)} estimé(s)")
+    return {"resultats": resultats}
+
+
+@app.post("/admin/completer-aliments")
+async def completer_aliments(x_admin_secret: str = Header(default=""),
+                             limite: int = 300):
+    """Complète sucres/saturés/fibres partout où ils manquent, dans les
+    deux tables partagées. Idempotent : ne touche que les lignes à NULL.
+    `limite` borne le nombre de lignes traitées par appel."""
+    attendu = os.environ.get("ADMIN_SECRET", "")
+    if not attendu or x_admin_secret != attendu:
+        raise HTTPException(status_code=403, detail="Accès refusé")
+    if not engine:
+        raise HTTPException(status_code=503, detail="Base indisponible")
+
+    db = Session()
+    bilan = {"aliments_generiques": 0, "plats_partages": 0, "echecs": 0}
+    try:
+        # 1. Aliments génériques : valeurs pour 100 g.
+        lignes = db.query(AlimentGenerique).filter(
+            AlimentGenerique.sucres_g.is_(None)).limit(limite).all()
+        for debut in range(0, len(lignes), 30):
+            paquet = lignes[debut:debut + 30]
+            entrees = [{"nom": l.nom, "calories": l.calories or 0,
+                        "proteines_g": l.proteines_g or 0, "glucides_g": l.glucides_g or 0,
+                        "lipides_g": l.lipides_g or 0, "poids_g": 100} for l in paquet]
+            try:
+                resultats = estimer_secondaires(entrees)
+            except Exception as e:
+                print(f"[completer-aliments] paquet générique en échec : {e}")
+                bilan["echecs"] += len(paquet)
+                continue
+            for l, r in zip(paquet, resultats):
+                if r is None:
+                    bilan["echecs"] += 1
+                    continue
+                l.sucres_g = r["sucres_g"]
+                l.ag_satures_g = r["ag_satures_g"]
+                # Les fibres existaient déjà : on ne remplace qu'un 0 douteux.
+                if not l.fibres_g:
+                    l.fibres_g = r["fibres_g"]
+                bilan["aliments_generiques"] += 1
+            db.commit()
+
+        # 2. Plats partagés : valeurs pour la portion décrite.
+        plats = db.query(PlatPartage).filter(
+            PlatPartage.sucres_g.is_(None), PlatPartage.calories > 0).limit(limite).all()
+        for debut in range(0, len(plats), 30):
+            paquet = plats[debut:debut + 30]
+            entrees = [{"nom": p.nom, "calories": p.calories or 0,
+                        "proteines_g": p.proteines_g or 0, "glucides_g": p.glucides_g or 0,
+                        "lipides_g": p.lipides_g or 0, "poids_g": 0} for p in paquet]
+            try:
+                resultats = estimer_secondaires(entrees)
+            except Exception as e:
+                print(f"[completer-aliments] paquet plats en échec : {e}")
+                bilan["echecs"] += len(paquet)
+                continue
+            for p, r in zip(paquet, resultats):
+                if r is None:
+                    bilan["echecs"] += 1
+                    continue
+                p.sucres_g, p.ag_satures_g, p.fibres_g = r["sucres_g"], r["ag_satures_g"], r["fibres_g"]
+                bilan["plats_partages"] += 1
+            db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"[completer-aliments] ERREUR : {type(e).__name__}: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Complétion échouée : {type(e).__name__}")
+    finally:
+        db.close()
+
+    print(f"[completer-aliments] {bilan}")
+    return bilan
+
+
 @app.get("/health")
 def health():
     return {"status": "healthy", "service": "nutriscan", "version": "1.0.0"}
@@ -933,7 +1113,8 @@ async def get_plat(nom: str):
         "nutrients": json.loads(plat.nutrients) if plat.nutrients else [],
         "conseils": json.loads(plat.conseils) if plat.conseils else [],
         "description": "Plat reconnu depuis la base partagée",
-        "macros": {"calories": plat.calories, "proteines_g": plat.proteines_g, "glucides_g": plat.glucides_g, "lipides_g": plat.lipides_g}
+        "macros": {"calories": plat.calories, "proteines_g": plat.proteines_g, "glucides_g": plat.glucides_g, "lipides_g": plat.lipides_g,
+                   "sucres_g": plat.sucres_g, "ag_satures_g": plat.ag_satures_g, "fibres_g": plat.fibres_g}
     }
 
 @app.post("/correction")
@@ -1477,6 +1658,9 @@ if engine:
         with engine.begin() as conn:
             conn.execute(_text("ALTER TABLE aliments_generiques ADD COLUMN IF NOT EXISTS sucres_g INTEGER"))
             conn.execute(_text("ALTER TABLE aliments_generiques ADD COLUMN IF NOT EXISTS ag_satures_g INTEGER"))
+            conn.execute(_text("ALTER TABLE plats_partages ADD COLUMN IF NOT EXISTS sucres_g INTEGER"))
+            conn.execute(_text("ALTER TABLE plats_partages ADD COLUMN IF NOT EXISTS ag_satures_g INTEGER"))
+            conn.execute(_text("ALTER TABLE plats_partages ADD COLUMN IF NOT EXISTS fibres_g INTEGER"))
     except Exception as e:
         print(f"[aliments_generiques] migration impossible : {e}")
 
