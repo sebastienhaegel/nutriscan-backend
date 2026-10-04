@@ -786,6 +786,125 @@ async def completer_aliments(x_admin_secret: str = Header(default=""),
     return bilan
 
 
+
+# =====================================================================
+# Export / import en masse, pour corriger la base dans un tableur
+#
+# Aller-retour : GET /admin/exporter-aliments renvoie un CSV, on le
+# corrige dans Numbers ou Excel, POST /admin/importer-plats (ou
+# /admin/importer-aliments pour les génériques) le réécrit. Les deux
+# routes partagent le format : UNE LIGNE PAR ALIMENT, valeurs PAR
+# PORTION, avec la masse de la portion. C'est ainsi que les chaînes et
+# les étiquettes publient leurs chiffres — on corrige ce qu'on lit.
+# Script côté Mac : corriger_plats.py.
+# =====================================================================
+
+import csv as _csv
+import io as _io
+from fastapi.responses import PlainTextResponse as _PlainTextResponse
+
+COLONNES_EXPORT = ["nom", "portion_g", "portion_libelle", "calories", "proteines_g",
+                   "glucides_g", "lipides_g", "sucres_g", "ag_satures_g", "fibres_g", "score"]
+
+
+def _vide_si_none(v):
+    return "" if v is None else v
+
+
+@app.get("/admin/exporter-aliments")
+async def exporter_aliments(table: str = "generiques",
+                            x_admin_secret: str = Header(default="")):
+    """CSV de la table demandée : `generiques` (aliments par nom) ou
+    `plats` (plats photo partagés). Même colonnes dans les deux cas."""
+    attendu = os.environ.get("ADMIN_SECRET", "")
+    if not attendu or x_admin_secret != attendu:
+        raise HTTPException(status_code=403, detail="Accès refusé")
+    if not engine:
+        raise HTTPException(status_code=503, detail="Base indisponible")
+
+    tampon = _io.StringIO()
+    w = _csv.writer(tampon)
+    w.writerow(COLONNES_EXPORT)
+    db = Session()
+    try:
+        if table == "plats":
+            for p in db.query(PlatPartage).filter(PlatPartage.valide == True).order_by(PlatPartage.nom).all():
+                # Pas de masse connue pour un plat photo : portion_g = 0,
+                # les valeurs sont celles de la portion analysée.
+                w.writerow([p.nom, 0, "", p.calories, p.proteines_g, p.glucides_g, p.lipides_g,
+                            _vide_si_none(p.sucres_g), _vide_si_none(p.ag_satures_g),
+                            _vide_si_none(p.fibres_g), p.score])
+        else:
+            for a in db.query(AlimentGenerique).order_by(AlimentGenerique.nom).all():
+                # Stocké pour 100 g ; exporté pour la portion, comme à l'import.
+                portion = a.portion_g if (a.portion_g or 0) > 0 else 100
+                f = portion / 100.0
+                def r(v):
+                    return "" if v is None else round(v * f)
+                w.writerow([a.nom, portion, a.portion_libelle or "", r(a.calories), r(a.proteines_g),
+                            r(a.glucides_g), r(a.lipides_g), r(a.sucres_g), r(a.ag_satures_g),
+                            r(a.fibres_g), ""])
+    finally:
+        db.close()
+    return _PlainTextResponse(tampon.getvalue(), media_type="text/csv; charset=utf-8")
+
+
+class PlatImport(BaseModel):
+    nom: str
+    calories: int
+    proteines_g: int = 0
+    glucides_g: int = 0
+    lipides_g: int = 0
+    sucres_g: int | None = None
+    ag_satures_g: int | None = None
+    fibres_g: int | None = None
+    score: int | None = None
+
+
+class ImportPlatsRequest(BaseModel):
+    plats: list[PlatImport]
+
+
+@app.post("/admin/importer-plats")
+async def importer_plats(req: ImportPlatsRequest,
+                         x_admin_secret: str = Header(default="")):
+    """Réécrit des plats partagés, identifiés par leur nom EXACT. Un nom
+    inconnu est ignoré (et compté) : cette route corrige, elle ne crée
+    pas — un plat photo sans analyse n'aurait ni verdict ni conseils."""
+    attendu = os.environ.get("ADMIN_SECRET", "")
+    if not attendu or x_admin_secret != attendu:
+        raise HTTPException(status_code=403, detail="Accès refusé")
+    if not engine:
+        raise HTTPException(status_code=503, detail="Base indisponible")
+
+    db = Session()
+    corriges, inconnus = 0, []
+    try:
+        for p in req.plats:
+            plat = db.query(PlatPartage).filter(PlatPartage.nom == p.nom.strip()).first()
+            if not plat:
+                inconnus.append(p.nom)
+                continue
+            plat.calories = p.calories
+            plat.proteines_g = p.proteines_g
+            plat.glucides_g = p.glucides_g
+            plat.lipides_g = p.lipides_g
+            if p.sucres_g is not None: plat.sucres_g = p.sucres_g
+            if p.ag_satures_g is not None: plat.ag_satures_g = p.ag_satures_g
+            if p.fibres_g is not None: plat.fibres_g = p.fibres_g
+            if p.score is not None: plat.score = max(0, min(100, p.score))
+            corriges += 1
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"[importer-plats] ERREUR : {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=f"Import échoué : {type(e).__name__}")
+    finally:
+        db.close()
+    print(f"[importer-plats] {corriges} corrigé(s), {len(inconnus)} inconnu(s)")
+    return {"corriges": corriges, "inconnus": inconnus[:50]}
+
+
 @app.get("/health")
 def health():
     return {"status": "healthy", "service": "nutriscan", "version": "1.0.0"}
@@ -1426,6 +1545,14 @@ if engine:
 
 
 class ScoreAlimentRequest(BaseModel):
+    """`source_code` identifie l'aliment pour le cache, tous utilisateurs
+    confondus. Son préfixe dit d'où viennent les chiffres :
+      <alim_code>      Ciqual (Anses), aliment brut ou générique
+      off-<ean>        Open Food Facts, produit du commerce
+      ia-<nom>         aliment générique estimé par Claude
+      perso-<clé>      produit saisi à la main ou lu sur une étiquette
+    Les trois valeurs secondaires sont facultatives : absentes, Claude ne
+    doit ni les inventer ni pénaliser l'aliment."""
     source_code: str
     nom: str
     calories: int = 0
@@ -1433,6 +1560,31 @@ class ScoreAlimentRequest(BaseModel):
     glucides_g: int = 0
     lipides_g: int = 0
     fibres_g: int = 0
+    sucres_g: int | None = None
+    ag_satures_g: int | None = None
+    marque: str = ""
+
+
+def _contexte_score(req: "ScoreAlimentRequest") -> tuple[str, str]:
+    """(provenance lisible, consigne propre à la source) pour le prompt."""
+    code = req.source_code
+    if code.startswith("off-"):
+        return ("l'étiquette du fabricant (Open Food Facts)",
+                "C'est un produit du commerce : tiens compte de son degré de "
+                "transformation probable, des sucres et graisses saturées "
+                "s'ils sont donnés, et de ce que tu sais de ce type de produit.")
+    if code.startswith("ia-"):
+        return ("une estimation (plat composé ou marque absente de Ciqual)",
+                "Les chiffres sont approximatifs : juge surtout la nature de "
+                "l'aliment ou du plat, ses ingrédients habituels et son degré "
+                "de transformation.")
+    if code.startswith("perso-"):
+        return ("une étiquette lue ou une saisie manuelle de l'utilisateur",
+                "Les chiffres viennent d'une étiquette : fie-toi d'abord à eux, "
+                "puis au type de produit que le nom indique.")
+    return ("la table Ciqual de l'Anses",
+            "Appuie-toi sur ta connaissance de cet aliment pour les vitamines, "
+            "minéraux et le degré de transformation.")
 
 
 @app.post("/score-aliment")
@@ -1468,22 +1620,29 @@ async def score_aliment(req: ScoreAlimentRequest, force: bool = False):
             session.close()
 
     # ---- 2. Claude ---------------------------------------------------
+    provenance, consigne = _contexte_score(req)
+    morceaux = []
+    if req.sucres_g is not None:
+        morceaux.append(f"{req.sucres_g} g de sucres")
+    if req.ag_satures_g is not None:
+        morceaux.append(f"{req.ag_satures_g} g d'acides gras saturés")
+    secondaires = (", " + ", ".join(morceaux)) if morceaux else ""
     try:
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
         prompt = f"""Tu es un expert en nutrition. Note la qualité nutritionnelle
-de cet aliment brut, pour 100 grammes. La note porte sur l'aliment lui-même,
+de cet aliment ou produit, pour 100 grammes. La note porte sur l'aliment lui-même,
 sa densité nutritionnelle — pas sur la quantité consommée.
 
-Aliment : {req.nom}
+Aliment : {req.nom}{(" (" + req.marque.strip() + ")") if req.marque.strip() else ""}
 Pour 100 g : {req.calories} kcal, {req.proteines_g} g de protéines,
 {req.glucides_g} g de glucides, {req.lipides_g} g de lipides,
-{req.fibres_g} g de fibres.
+{req.fibres_g} g de fibres{secondaires}.
 
-Ces chiffres viennent de la table Ciqual de l'Anses et ne couvrent que
-les macronutriments. Ne pénalise PAS l'aliment pour les données absentes
-et ne commente pas leur absence : appuie-toi sur ta connaissance de cet
-aliment pour les vitamines, minéraux et le degré de transformation.
-Une valeur à 0 peut signifier « non renseigné » et non « absent ».
+Ces chiffres viennent de {provenance} et ne couvrent que
+quelques nutriments. {consigne}
+Ne pénalise PAS l'aliment pour les données absentes et ne commente pas
+leur absence. Une valeur à 0 peut signifier « non renseigné » et non
+« absent ».
 
 Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
 {{"score": 85, "verdict": "Excellent choix", "commentaire": "Deux phrases sur l'intérêt nutritionnel de cet aliment.", "conseils": ["Conseil 1", "Conseil 2"]}}
@@ -1922,6 +2081,70 @@ async def aliment_propose(req: AlimentProposeRequest):
     except Exception as e:
         session.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        session.close()
+
+
+@app.get("/admin/en-attente", response_class=HTMLResponse)
+async def propositions_en_attente(cle: str = ""):
+    """Page d'administration : tout ce qui attend une décision — aliments
+    proposés et corrections de plats — avec les mêmes liens Valider /
+    Rejeter que les courriels. Sert quand un courriel est perdu, ou pour
+    traiter une file d'un coup.
+
+    La clé passe en paramètre d'URL (`?cle=`) plutôt qu'en en-tête : la
+    page s'ouvre dans un navigateur, qui ne sait pas poser d'en-tête.
+    HTTPS la protège en transit ; elle n'est jamais écrite dans la page.
+    """
+    attendu = os.environ.get("ADMIN_SECRET", "")
+    if not attendu or cle != attendu:
+        return HTMLResponse("<h1>Accès refusé</h1>", status_code=403)
+    if not engine:
+        return HTMLResponse("<h1>Base de données non disponible</h1>")
+
+    import html as _html
+    e = _html.escape
+    session = Session()
+    try:
+        aliments = session.query(AlimentPropose).filter(
+            AlimentPropose.statut == "pending").order_by(AlimentPropose.date_soumission).all()
+        corrections = session.query(CorrectionPending).filter(
+            CorrectionPending.statut == "pending").order_by(CorrectionPending.date_soumission).all()
+
+        def bouton(href, libelle, couleur):
+            return (f'<a href="{href}" target="_blank" style="background:{couleur};color:white;'
+                    f'padding:6px 14px;border-radius:6px;text-decoration:none;margin-right:8px">{libelle}</a>')
+
+        lignes_a = "".join(f"""<tr>
+            <td><strong>{e(p.nom)}</strong><br><small style="color:gray">{e(p.portion_libelle or '')}
+                {f'({p.portion_g} g)' if p.portion_g else ''}</small></td>
+            <td>{p.calories} kcal · P {p.proteines_g} · G {p.glucides_g} · L {p.lipides_g} · fibres {p.fibres_g}</td>
+            <td><small>{p.date_soumission.strftime('%d/%m/%Y') if p.date_soumission else ''}</small></td>
+            <td>{bouton(f'/admin/valider-aliment/{p.id}', '✅ Valider', '#22c55e')}
+                {bouton(f'/admin/rejeter-aliment/{p.id}', '❌ Rejeter', '#ef4444')}</td>
+            </tr>""" for p in aliments) or '<tr><td colspan="4" style="color:gray">Aucune</td></tr>'
+
+        lignes_c = "".join(f"""<tr>
+            <td>{e(c.nom_original)} → <strong>{e(c.nom_corrige)}</strong></td>
+            <td>{c.calories_corrige} kcal · P {c.proteines_corrige} · G {c.glucides_corrige} · L {c.lipides_corrige}</td>
+            <td><small>{c.date_soumission.strftime('%d/%m/%Y') if c.date_soumission else ''}</small></td>
+            <td>{bouton(f'/admin/valider/{c.id}', '✅ Valider', '#22c55e')}
+                {bouton(f'/admin/rejeter/{c.id}', '❌ Rejeter', '#ef4444')}</td>
+            </tr>""" for c in corrections) or '<tr><td colspan="4" style="color:gray">Aucune</td></tr>'
+
+        return HTMLResponse(f"""<html><head><meta charset="utf-8"><title>En attente</title>
+        <style>body{{font-family:-apple-system,sans-serif;padding:32px;max-width:1100px;margin:auto}}
+        table{{border-collapse:collapse;width:100%;margin-bottom:40px}}
+        td,th{{text-align:left;padding:10px 8px;border-bottom:1px solid #e5e7eb;vertical-align:top}}
+        th{{color:gray;font-weight:500;font-size:13px}}</style></head><body>
+        <h1>En attente de décision</h1>
+        <p style="color:gray">Chaque lien s'ouvre dans un nouvel onglet ; rechargez cette page pour voir la file se vider.
+        Valider un aliment le copie dans la base commune, pour 100 g.</p>
+        <h2>Aliments proposés ({len(aliments)})</h2>
+        <table><tr><th>Aliment</th><th>Pour 100 g</th><th>Proposé le</th><th></th></tr>{lignes_a}</table>
+        <h2>Corrections de plats ({len(corrections)})</h2>
+        <table><tr><th>Plat</th><th>Valeurs corrigées</th><th>Proposée le</th><th></th></tr>{lignes_c}</table>
+        </body></html>""")
     finally:
         session.close()
 
