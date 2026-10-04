@@ -66,6 +66,10 @@ class CorrectionPending(Base):
     proteines_corrige = Column(Integer, default=0)
     glucides_corrige = Column(Integer, default=0)
     lipides_corrige = Column(Integer, default=0)
+    # Nullables : une correction peut ne porter que sur les macros.
+    sucres_corrige = Column(Integer, nullable=True)
+    ag_satures_corrige = Column(Integer, nullable=True)
+    fibres_corrige = Column(Integer, nullable=True)
     user_id = Column(String, nullable=False)
     statut = Column(String, default="pending")
     date_soumission = Column(DateTime, default=datetime.utcnow)
@@ -165,6 +169,10 @@ class CorrectionRequest(BaseModel):
     glucides_g: int
     lipides_g: int
     user_id: str
+    # Facultatifs : absents quand l'utilisateur ne les connaît pas.
+    sucres_g: int | None = None
+    ag_satures_g: int | None = None
+    fibres_g: int | None = None
 
 class ScanMenuRequest(BaseModel):
     image_base64: str
@@ -1244,7 +1252,7 @@ async def soumettre_correction(req: CorrectionRequest):
     try:
         plat = chercher_plat_partage(req.nom_original)
         plat_id = plat.id if plat else None
-        correction = CorrectionPending(id=str(uuid.uuid4()), plat_id=plat_id, nom_original=req.nom_original, nom_corrige=req.nom_corrige, calories_corrige=req.calories, proteines_corrige=req.proteines_g, glucides_corrige=req.glucides_g, lipides_corrige=req.lipides_g, user_id=req.user_id, statut="pending")
+        correction = CorrectionPending(id=str(uuid.uuid4()), plat_id=plat_id, nom_original=req.nom_original, nom_corrige=req.nom_corrige, calories_corrige=req.calories, proteines_corrige=req.proteines_g, glucides_corrige=req.glucides_g, lipides_corrige=req.lipides_g, sucres_corrige=req.sucres_g, ag_satures_corrige=req.ag_satures_g, fibres_corrige=req.fibres_g, user_id=req.user_id, statut="pending")
         session.add(correction)
         session.commit()
         envoyer_email_correction(correction.id, req.nom_original, req.nom_corrige, req.user_id)
@@ -1287,8 +1295,11 @@ async def valider_correction(correction_id: str):
                 plat.proteines_g = correction.proteines_corrige
                 plat.glucides_g = correction.glucides_corrige
                 plat.lipides_g = correction.lipides_corrige
+                if correction.sucres_corrige is not None: plat.sucres_g = correction.sucres_corrige
+                if correction.ag_satures_corrige is not None: plat.ag_satures_g = correction.ag_satures_corrige
+                if correction.fibres_corrige is not None: plat.fibres_g = correction.fibres_corrige
         else:
-            nouveau = PlatPartage(id=str(uuid.uuid4()), nom=correction.nom_corrige, calories=correction.calories_corrige, proteines_g=correction.proteines_corrige, glucides_g=correction.glucides_corrige, lipides_g=correction.lipides_corrige, score=0, valide=True)
+            nouveau = PlatPartage(id=str(uuid.uuid4()), nom=correction.nom_corrige, calories=correction.calories_corrige, proteines_g=correction.proteines_corrige, glucides_g=correction.glucides_corrige, lipides_g=correction.lipides_corrige, sucres_g=correction.sucres_corrige, ag_satures_g=correction.ag_satures_corrige, fibres_g=correction.fibres_corrige, score=0, valide=True)
             session.add(nouveau)
         correction.statut = "validee"
         session.commit()
@@ -1551,6 +1562,7 @@ class ScoreAlimentRequest(BaseModel):
       off-<ean>        Open Food Facts, produit du commerce
       ia-<nom>         aliment générique estimé par Claude
       perso-<clé>      produit saisi à la main ou lu sur une étiquette
+      cantine-<nom>    plat de cantine corrigé à la main dans l'app
     Les trois valeurs secondaires sont facultatives : absentes, Claude ne
     doit ni les inventer ni pénaliser l'aliment."""
     source_code: str
@@ -1578,6 +1590,11 @@ def _contexte_score(req: "ScoreAlimentRequest") -> tuple[str, str]:
                 "Les chiffres sont approximatifs : juge surtout la nature de "
                 "l'aliment ou du plat, ses ingrédients habituels et son degré "
                 "de transformation.")
+    if code.startswith("cantine-"):
+        return ("une estimation de portion de cantine scolaire",
+                "C'est un plat de restauration collective pour un enfant : juge "
+                "la recette habituelle de ce plat en cantine, son degré de "
+                "transformation et son équilibre, plus que les chiffres.")
     if code.startswith("perso-"):
         return ("une étiquette lue ou une saisie manuelle de l'utilisateur",
                 "Les chiffres viennent d'une étiquette : fie-toi d'abord à eux, "
@@ -1820,6 +1837,9 @@ if engine:
             conn.execute(_text("ALTER TABLE plats_partages ADD COLUMN IF NOT EXISTS sucres_g INTEGER"))
             conn.execute(_text("ALTER TABLE plats_partages ADD COLUMN IF NOT EXISTS ag_satures_g INTEGER"))
             conn.execute(_text("ALTER TABLE plats_partages ADD COLUMN IF NOT EXISTS fibres_g INTEGER"))
+            conn.execute(_text("ALTER TABLE corrections_pending ADD COLUMN IF NOT EXISTS sucres_corrige INTEGER"))
+            conn.execute(_text("ALTER TABLE corrections_pending ADD COLUMN IF NOT EXISTS ag_satures_corrige INTEGER"))
+            conn.execute(_text("ALTER TABLE corrections_pending ADD COLUMN IF NOT EXISTS fibres_corrige INTEGER"))
     except Exception as e:
         print(f"[aliments_generiques] migration impossible : {e}")
 
@@ -2126,7 +2146,10 @@ async def propositions_en_attente(cle: str = ""):
 
         lignes_c = "".join(f"""<tr>
             <td>{e(c.nom_original)} → <strong>{e(c.nom_corrige)}</strong></td>
-            <td>{c.calories_corrige} kcal · P {c.proteines_corrige} · G {c.glucides_corrige} · L {c.lipides_corrige}</td>
+            <td>{c.calories_corrige} kcal · P {c.proteines_corrige} · G {c.glucides_corrige} · L {c.lipides_corrige}
+                {f'· sucres {c.sucres_corrige}' if c.sucres_corrige is not None else ''}
+                {f'· AGS {c.ag_satures_corrige}' if c.ag_satures_corrige is not None else ''}
+                {f'· fibres {c.fibres_corrige}' if c.fibres_corrige is not None else ''}</td>
             <td><small>{c.date_soumission.strftime('%d/%m/%Y') if c.date_soumission else ''}</small></td>
             <td>{bouton(f'/admin/valider/{c.id}', '✅ Valider', '#22c55e')}
                 {bouton(f'/admin/rejeter/{c.id}', '❌ Rejeter', '#ef4444')}</td>
