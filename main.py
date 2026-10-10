@@ -819,6 +819,36 @@ def _vide_si_none(v):
     return "" if v is None else v
 
 
+@app.get("/admin/liste-aliments")
+async def liste_aliments(table: str = "generiques", limite: int = 500,
+                         x_admin_secret: str = Header(default="")):
+    """Même contenu que l'export CSV, en JSON, pour l'écran Administration
+    de l'app. Génériques : valeurs POUR 100 g + portion usuelle. Plats :
+    valeurs de la portion analysée."""
+    attendu = os.environ.get("ADMIN_SECRET", "")
+    if not attendu or x_admin_secret != attendu:
+        raise HTTPException(status_code=403, detail="Accès refusé")
+    if not engine:
+        raise HTTPException(status_code=503, detail="Base indisponible")
+    db = Session()
+    try:
+        if table == "plats":
+            lignes = db.query(PlatPartage).filter(PlatPartage.valide == True).order_by(PlatPartage.nom).limit(limite).all()
+            return {"table": "plats", "aliments": [{
+                "nom": p.nom, "calories": p.calories, "proteines_g": p.proteines_g,
+                "glucides_g": p.glucides_g, "lipides_g": p.lipides_g,
+                "sucres_g": p.sucres_g, "ag_satures_g": p.ag_satures_g, "fibres_g": p.fibres_g,
+                "score": p.score, "utilisations": p.nombre_utilisations} for p in lignes]}
+        lignes = db.query(AlimentGenerique).order_by(AlimentGenerique.nom).limit(limite).all()
+        return {"table": "generiques", "aliments": [{
+            "nom": a.nom, "calories": a.calories, "proteines_g": a.proteines_g,
+            "glucides_g": a.glucides_g, "lipides_g": a.lipides_g,
+            "sucres_g": a.sucres_g, "ag_satures_g": a.ag_satures_g, "fibres_g": a.fibres_g,
+            "portion_g": a.portion_g, "portion_libelle": a.portion_libelle or "",
+            "utilisations": a.nombre_demandes} for a in lignes]}
+    finally:
+        db.close()
+
 @app.get("/admin/exporter-aliments")
 async def exporter_aliments(table: str = "generiques",
                             x_admin_secret: str = Header(default="")):
