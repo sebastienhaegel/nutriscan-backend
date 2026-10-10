@@ -819,6 +819,271 @@ def _vide_si_none(v):
     return "" if v is None else v
 
 
+# =====================================================================
+# Produits partagés et portions Ciqual communes
+#
+# produits_partages : une fiche par code-barres, recopiée de l'étiquette
+# par un utilisateur (création ou correction dans l'app). Factuelle,
+# donc partagée sans validation ; l'administrateur corrige ou retire
+# une fiche depuis l'app. Au scan, l'app la consulte AVANT Open Food
+# Facts (voir OpenFoodFacts.swift).
+#
+# portions_ciqual : les portions usuelles corrigées par l'administrateur
+# pour les aliments Anses, téléchargées par chaque app au lancement.
+# =====================================================================
+
+class ProduitPartage(Base):
+    __tablename__ = "produits_partages"
+    code_barres = Column(String, primary_key=True)
+    nom = Column(String, nullable=False)
+    marque = Column(String, default="")
+    quantite = Column(String, default="")
+    categorie = Column(String, default="Autre")
+    # Pour 100 g (ou 100 ml si boisson)
+    energie_kcal = Column(Float, default=0)
+    proteines_g = Column(Float, default=0)
+    glucides_g = Column(Float, default=0)
+    lipides_g = Column(Float, default=0)
+    sucres_g = Column(Float, nullable=True)
+    ag_satures_g = Column(Float, nullable=True)
+    fibres_g = Column(Float, nullable=True)
+    boisson = Column(Boolean, default=False)
+    valide = Column(Boolean, default=True)
+    user_id = Column(String, default="")
+    nombre_utilisations = Column(Integer, default=1)
+    date_maj = Column(DateTime, default=datetime.utcnow)
+
+
+class PortionCiqual(Base):
+    __tablename__ = "portions_ciqual"
+    source_code = Column(String, primary_key=True)
+    grammes = Column(Float, nullable=False)
+    libelle = Column(String, default="")
+    date_maj = Column(DateTime, default=datetime.utcnow)
+
+
+if engine:
+    Base.metadata.create_all(engine)
+
+
+class ProduitPartageRequete(BaseModel):
+    code_barres: str
+    nom: str
+    marque: str = ""
+    quantite: str = ""
+    categorie: str = "Autre"
+    energie_kcal: float = 0
+    proteines_g: float = 0
+    glucides_g: float = 0
+    lipides_g: float = 0
+    sucres_g: float | None = None
+    ag_satures_g: float | None = None
+    fibres_g: float | None = None
+    boisson: bool = False
+    user_id: str = ""
+    valide: bool = True
+
+
+class LotProduitsRequete(BaseModel):
+    produits: list[ProduitPartageRequete]
+
+
+def _code_barres_valide(code: str) -> bool:
+    """Un vrai code-barres : 8 à 14 chiffres. Les clés « nom-… » des
+    génériques et « perso-… » ne sont pas partagées ici."""
+    return code.isdigit() and 8 <= len(code) <= 14
+
+
+def _produit_vers_dict(p: ProduitPartage) -> dict:
+    return {"code_barres": p.code_barres, "nom": p.nom, "marque": p.marque or "",
+            "quantite": p.quantite or "", "categorie": p.categorie or "Autre",
+            "energie_kcal": p.energie_kcal, "proteines_g": p.proteines_g,
+            "glucides_g": p.glucides_g, "lipides_g": p.lipides_g,
+            "sucres_g": p.sucres_g, "ag_satures_g": p.ag_satures_g, "fibres_g": p.fibres_g,
+            "boisson": bool(p.boisson), "utilisations": p.nombre_utilisations,
+            "source": "communaute"}
+
+
+def _enregistrer_produits(db, produits: list, admin: bool = False) -> tuple[int, int]:
+    """Upsert par code-barres. Sans droits admin, une fiche existante
+    n'est écrasée que par des valeurs plus complètes (sucres, saturés ou
+    fibres renseignés là où ils manquaient) ou par son auteur."""
+    enregistres, ignores = 0, 0
+    for p in produits:
+        code = p.code_barres.strip()
+        if not _code_barres_valide(code) or len(p.nom.strip()) < 2 or p.energie_kcal <= 0:
+            ignores += 1
+            continue
+        existant = db.query(ProduitPartage).filter(ProduitPartage.code_barres == code).first()
+        if existant and not admin and existant.user_id and existant.user_id != p.user_id:
+            apporte = any(getattr(existant, c) is None and getattr(p, c) is not None
+                          for c in ("sucres_g", "ag_satures_g", "fibres_g"))
+            if not apporte:
+                existant.nombre_utilisations += 1
+                ignores += 1
+                continue
+        ligne = existant or ProduitPartage(code_barres=code, user_id=p.user_id)
+        ligne.nom = p.nom.strip()
+        ligne.marque = p.marque.strip()
+        ligne.quantite = p.quantite.strip()
+        ligne.categorie = p.categorie.strip() or "Autre"
+        ligne.energie_kcal = p.energie_kcal
+        ligne.proteines_g = p.proteines_g
+        ligne.glucides_g = p.glucides_g
+        ligne.lipides_g = p.lipides_g
+        # Une valeur connue n'est jamais remplacée par « inconnu ».
+        if p.sucres_g is not None: ligne.sucres_g = p.sucres_g
+        if p.ag_satures_g is not None: ligne.ag_satures_g = p.ag_satures_g
+        if p.fibres_g is not None: ligne.fibres_g = p.fibres_g
+        ligne.boisson = p.boisson
+        if admin:
+            ligne.valide = p.valide
+        ligne.date_maj = datetime.utcnow()
+        if not existant:
+            db.add(ligne)
+        enregistres += 1
+    return enregistres, ignores
+
+
+@app.post("/produit-partage")
+async def partager_produit(req: ProduitPartageRequete):
+    """Un utilisateur crée ou corrige un produit : la fiche rejoint la
+    base commune."""
+    if not engine:
+        raise HTTPException(status_code=503, detail="Base indisponible")
+    db = Session()
+    try:
+        n, ignores = _enregistrer_produits(db, [req])
+        db.commit()
+        return {"enregistres": n, "ignores": ignores}
+    except Exception as e:
+        db.rollback()
+        print(f"[produit-partage] ERREUR : {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Partage impossible")
+    finally:
+        db.close()
+
+
+@app.post("/produit-partage/lot")
+async def partager_produits_lot(req: LotProduitsRequete):
+    """Envoi groupé : un utilisateur partage d'un coup ses produits
+    déjà saisis (bouton dans Administration → Produits)."""
+    if not engine:
+        raise HTTPException(status_code=503, detail="Base indisponible")
+    db = Session()
+    try:
+        n, ignores = _enregistrer_produits(db, req.produits[:500])
+        db.commit()
+        print(f"[produit-partage] lot : {n} enregistré(s), {ignores} ignoré(s)")
+        return {"enregistres": n, "ignores": ignores}
+    except Exception as e:
+        db.rollback()
+        print(f"[produit-partage] ERREUR lot : {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Partage impossible")
+    finally:
+        db.close()
+
+
+@app.get("/produit/{code_barres}")
+async def produit_partage(code_barres: str):
+    """La fiche commune d'un code-barres, ou 404. Consultée par l'app
+    avant Open Food Facts."""
+    if not engine:
+        raise HTTPException(status_code=503, detail="Base indisponible")
+    db = Session()
+    try:
+        p = db.query(ProduitPartage).filter(ProduitPartage.code_barres == code_barres.strip(),
+                                            ProduitPartage.valide == True).first()
+        if not p:
+            raise HTTPException(status_code=404, detail="Produit inconnu")
+        p.nombre_utilisations += 1
+        db.commit()
+        return _produit_vers_dict(p)
+    finally:
+        db.close()
+
+
+@app.post("/admin/importer-produits")
+async def importer_produits(req: LotProduitsRequete, x_admin_secret: str = Header(default="")):
+    """Correction administrateur : écrase, et `valide: false` retire une
+    fiche de la base commune."""
+    attendu = os.environ.get("ADMIN_SECRET", "")
+    if not attendu or x_admin_secret != attendu:
+        raise HTTPException(status_code=403, detail="Accès refusé")
+    if not engine:
+        raise HTTPException(status_code=503, detail="Base indisponible")
+    db = Session()
+    try:
+        n, ignores = _enregistrer_produits(db, req.produits, admin=True)
+        db.commit()
+        return {"enregistres": n, "ignores": ignores}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Import échoué : {type(e).__name__}")
+    finally:
+        db.close()
+
+
+class PortionCiqualRequete(BaseModel):
+    source_code: str
+    grammes: float
+    libelle: str = ""
+
+
+class LotPortionsRequete(BaseModel):
+    portions: list[PortionCiqualRequete]
+
+
+@app.get("/portions-ciqual")
+async def portions_ciqual():
+    """Toutes les portions corrigées, pour que chaque app les applique
+    à sa base Ciqual embarquée."""
+    if not engine:
+        return {"portions": []}
+    db = Session()
+    try:
+        return {"portions": [{"source_code": p.source_code, "grammes": p.grammes, "libelle": p.libelle or ""}
+                             for p in db.query(PortionCiqual).all()]}
+    finally:
+        db.close()
+
+
+@app.post("/admin/portions-ciqual")
+async def definir_portions_ciqual(req: LotPortionsRequete, x_admin_secret: str = Header(default="")):
+    """Upsert ; grammes à 0 supprime la portion."""
+    attendu = os.environ.get("ADMIN_SECRET", "")
+    if not attendu or x_admin_secret != attendu:
+        raise HTTPException(status_code=403, detail="Accès refusé")
+    if not engine:
+        raise HTTPException(status_code=503, detail="Base indisponible")
+    db = Session()
+    try:
+        n = 0
+        for p in req.portions:
+            code = p.source_code.strip()
+            if not code:
+                continue
+            existant = db.query(PortionCiqual).filter(PortionCiqual.source_code == code).first()
+            if p.grammes <= 0:
+                if existant:
+                    db.delete(existant)
+                    n += 1
+                continue
+            ligne = existant or PortionCiqual(source_code=code)
+            ligne.grammes = p.grammes
+            ligne.libelle = p.libelle.strip()
+            ligne.date_maj = datetime.utcnow()
+            if not existant:
+                db.add(ligne)
+            n += 1
+        db.commit()
+        return {"enregistrees": n}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Échec : {type(e).__name__}")
+    finally:
+        db.close()
+
 @app.get("/admin/liste-aliments")
 async def liste_aliments(table: str = "generiques", limite: int = 500,
                          x_admin_secret: str = Header(default="")):
@@ -832,6 +1097,10 @@ async def liste_aliments(table: str = "generiques", limite: int = 500,
         raise HTTPException(status_code=503, detail="Base indisponible")
     db = Session()
     try:
+        if table == "produits":
+            lignes = db.query(ProduitPartage).order_by(ProduitPartage.nom).limit(limite).all()
+            return {"table": "produits", "aliments": [dict(_produit_vers_dict(p), valide=bool(p.valide))
+                                                      for p in lignes]}
         if table == "plats":
             lignes = db.query(PlatPartage).filter(PlatPartage.valide == True).order_by(PlatPartage.nom).limit(limite).all()
             return {"table": "plats", "aliments": [{
