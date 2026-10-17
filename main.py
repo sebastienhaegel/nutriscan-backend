@@ -2584,7 +2584,9 @@ async def suggerer_repas(req: SuggererRepasRequest):
         "Petit-déjeuner": 450, "Déjeuner": 700, "Dîner": 600, "Collation": 200,
     }.get(req.categorie, 600)
 
-    prompt = f"""Tu es un nutritionniste qui compose des repas concrets.
+    prompt = f"""Tu es un cuisinier et nutritionniste qui propose de VRAIS PLATS
+CUISINÉS, avec leur recette — pas des assemblages d'ingrédients posés
+côte à côte.
 
 CONTEXTE
 - Pour : {req.nombre_personnes} personne(s)
@@ -2597,12 +2599,18 @@ CONTEXTE
    lipides {req.lipides_restants} g)
 
 CONSIGNES
-1. Propose TROIS repas différents, adaptés au moment de la journée.
-2. SOBRIÉTÉ : de 3 à 5 ingrédients par repas, pas plus. Le frigo est
-   une réserve où PUISER, pas une liste à ÉPUISER. Un bon repas tient
-   en une protéine, un féculent ou légume, une matière grasse, et un
-   ou deux compléments. N'ajoute un ingrédient que s'il apporte quelque
-   chose que les autres n'apportent pas.
+1. Propose TROIS plats différents, adaptés au moment de la journée,
+   qui ont un NOM DE PLAT et une façon de les préparer : « Poêlée de
+   poulet aux poivrons et riz », « Omelette aux champignons », « Dahl
+   de lentilles corail », « Gratin de courgettes au chèvre ». PAS
+   « poulet + riz + brocoli » : un plat se cuisine, il a une cuisson,
+   un assaisonnement, un ordre. Un petit-déjeuner ou une collation
+   peuvent rester simples (porridge, tartines garnies), mais décrits
+   comme une préparation.
+2. SOBRIÉTÉ : de 3 à 6 ingrédients par plat (les aromates, épices et
+   condiments ne comptent pas). Le frigo est une réserve où PUISER,
+   pas une liste à ÉPUISER. N'ajoute un ingrédient que s'il apporte
+   quelque chose que les autres n'apportent pas.
 3. Puise dans le frigo. Un ingrédient absent est permis s'il est
    courant (huile, sel, un œuf), pas s'il faut aller l'acheter.
 4. Évite de reproduire les repas récents : c'est la variété qu'on
@@ -2618,24 +2626,35 @@ CONSIGNES
    protéine, 150 à 200 g de féculent cuit, 100 à 150 g de légumes, une
    cuillère de matière grasse. Un plat à 800 g pour une personne est une
    erreur, pas une générosité.
-7. Décompose chaque repas en INGRÉDIENTS, nommés comme dans la table
+7. Décompose chaque plat en INGRÉDIENTS, nommés comme dans la table
    Ciqual de l'Anses : en français, génériques, avec l'état de cuisson.
    « Riz blanc, cuit », « Blanc de poulet, rôti », « Huile d'olive ».
-   Les grammages doivent totaliser le poids du repas.
+   Les grammages doivent totaliser le poids du plat. Cette liste sert
+   au calcul nutritionnel ; la recette, elle, sert à cuisiner.
+8. RECETTE : pour chaque plat, le temps total en minutes (préparation
+   et cuisson, 10 à 40 min en semaine) et 3 à 6 étapes courtes, à
+   l'impératif, avec les cuissons et temps utiles : « Faire revenir
+   l'oignon 3 min dans l'huile », « Ajouter le riz et couvrir d'eau,
+   cuire 12 min ». Une étape = une phrase.
 
 Les macros, le poids et les grammages d'ingrédients portent sur le
 TOTAL pour {req.nombre_personnes} personne(s).
 
 Réponds UNIQUEMENT en JSON valide, sans backticks :
 {{"propositions": [
-  {{"nom": "Nom court du repas",
+  {{"nom": "Poêlée de poulet aux poivrons et riz",
     "description": "Une phrase : ce que c'est et pourquoi ça convient",
     "poids_g": 420,
     "score": 82,
     "macros": {{"calories": 610, "proteines_g": 38, "glucides_g": 62, "lipides_g": 18}},
     "ingredients": [
       {{"nom": "Riz blanc, cuit", "grammes": 150, "calories": 195, "proteines_g": 4, "glucides_g": 42, "lipides_g": 0}}
-    ]
+    ],
+    "recette": {{"temps_min": 25,
+                "etapes": ["Cuire le riz 12 min dans l'eau bouillante salée.",
+                           "Émincer le poulet et les poivrons.",
+                           "Faire revenir le poulet 5 min dans l'huile, ajouter les poivrons 5 min.",
+                           "Servir sur le riz, poivrer."]}}
   }}
 ]}}"""
 
@@ -2643,7 +2662,7 @@ Réponds UNIQUEMENT en JSON valide, sans backticks :
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
         response = client.messages.create(
             model="claude-sonnet-4-5",
-            max_tokens=2500,
+            max_tokens=3500,
             messages=[{"role": "user", "content": prompt}],
         )
         brut = parser_json_claude(response, defaut={"propositions": []},
@@ -2668,9 +2687,12 @@ Réponds UNIQUEMENT en JSON valide, sans backticks :
                 "glucides_g": _to_int(i.get("glucides_g")),
                 "lipides_g": _to_int(i.get("lipides_g")),
             })
+        recette_brute = p.get("recette") or {}
+        etapes = [str(e).strip() for e in (recette_brute.get("etapes") or []) if str(e).strip()][:8]
         propositions.append({
             "nom": str(p.get("nom") or "Repas").strip(),
             "description": str(p.get("description") or "").strip(),
+            "recette": {"temps_min": _to_int(recette_brute.get("temps_min")), "etapes": etapes},
             "poids_g": _to_int(p.get("poids_g")) or sum(i["grammes"] for i in ingredients),
             "score": max(0, min(100, _to_int(p.get("score"), 70))),
             "macros": {
