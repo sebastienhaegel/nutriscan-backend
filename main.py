@@ -2139,6 +2139,8 @@ if engine:
             conn.execute(_text("ALTER TABLE corrections_pending ADD COLUMN IF NOT EXISTS sucres_corrige INTEGER"))
             conn.execute(_text("ALTER TABLE corrections_pending ADD COLUMN IF NOT EXISTS ag_satures_corrige INTEGER"))
             conn.execute(_text("ALTER TABLE corrections_pending ADD COLUMN IF NOT EXISTS fibres_corrige INTEGER"))
+            conn.execute(_text("ALTER TABLE aliments_proposes ADD COLUMN IF NOT EXISTS sucres_g INTEGER"))
+            conn.execute(_text("ALTER TABLE aliments_proposes ADD COLUMN IF NOT EXISTS ag_satures_g INTEGER"))
     except Exception as e:
         print(f"[aliments_generiques] migration impossible : {e}")
 
@@ -2298,6 +2300,9 @@ class AlimentPropose(Base):
     glucides_g = Column(Integer, default=0)
     lipides_g = Column(Integer, default=0)
     fibres_g = Column(Integer, default=0)
+    # Nullables : la saisie peut ne pas les connaître.
+    sucres_g = Column(Integer, nullable=True)
+    ag_satures_g = Column(Integer, nullable=True)
     portion_g = Column(Integer, default=0)
     portion_libelle = Column(String, default="")
     user_id = Column(String, default="")
@@ -2316,6 +2321,9 @@ class AlimentProposeRequest(BaseModel):
     glucides_g: int = 0
     lipides_g: int = 0
     fibres_g: int = 0
+    # Facultatifs : absents = inconnus (jamais un 0 inventé).
+    sucres_g: int | None = None
+    ag_satures_g: int | None = None
     portion_g: int = 0
     portion_libelle: str = ""
     user_id: str = "anonymous"
@@ -2383,6 +2391,8 @@ async def aliment_propose(req: AlimentProposeRequest):
             glucides_g=_to_int(req.glucides_g),
             lipides_g=_to_int(req.lipides_g),
             fibres_g=_to_int(req.fibres_g),
+            sucres_g=_to_int_ou_none(req.sucres_g),
+            ag_satures_g=_to_int_ou_none(req.ag_satures_g),
             portion_g=_to_int(req.portion_g),
             portion_libelle=(req.portion_libelle or "").strip(),
             user_id=req.user_id,
@@ -2437,7 +2447,9 @@ async def propositions_en_attente(cle: str = ""):
         lignes_a = "".join(f"""<tr>
             <td><strong>{e(p.nom)}</strong><br><small style="color:gray">{e(p.portion_libelle or '')}
                 {f'({p.portion_g} g)' if p.portion_g else ''}</small></td>
-            <td>{p.calories} kcal · P {p.proteines_g} · G {p.glucides_g} · L {p.lipides_g} · fibres {p.fibres_g}</td>
+            <td>{p.calories} kcal · P {p.proteines_g} · G {p.glucides_g} · L {p.lipides_g} · fibres {p.fibres_g}
+                {f'· sucres {p.sucres_g}' if p.sucres_g is not None else ''}
+                {f'· AGS {p.ag_satures_g}' if p.ag_satures_g is not None else ''}</td>
             <td><small>{p.date_soumission.strftime('%d/%m/%Y') if p.date_soumission else ''}</small></td>
             <td>{bouton(f'/admin/valider-aliment/{p.id}', '✅ Valider', '#22c55e')}
                 {bouton(f'/admin/rejeter-aliment/{p.id}', '❌ Rejeter', '#ef4444')}</td>
@@ -2493,6 +2505,8 @@ async def valider_aliment(propose_id: str):
             glucides_g=p.glucides_g,
             lipides_g=p.lipides_g,
             fibres_g=p.fibres_g,
+            sucres_g=p.sucres_g,
+            ag_satures_g=p.ag_satures_g,
             portion_g=p.portion_g,
             portion_libelle=p.portion_libelle,
             nombre_demandes=1,
