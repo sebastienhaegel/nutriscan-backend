@@ -2283,6 +2283,42 @@ Règles :
     return propre
 
 
+@app.get("/aliments-generiques")
+async def aliments_generiques_tous(depuis: str = ""):
+    """Toute la table des aliments génériques, pour que chaque app la
+    fouille EN LOCAL dans sa liste de suggestions — comme Ciqual, comme
+    Mes Plats — au lieu de n'y accéder que par le bouton IA, sur le nom
+    exact. Public : ce sont des valeurs nutritionnelles, pas des données
+    personnelles. Quelques dizaines de Ko, téléchargés au lancement.
+
+    Valeurs POUR 100 g, portion usuelle à part. `depuis` (ISO 8601) ne
+    renvoie que les lignes créées après cette date — réservé à un usage
+    futur, l'app télécharge tout aujourd'hui.
+    """
+    if not engine:
+        return {"aliments": [], "total": 0}
+    db = Session()
+    try:
+        q = db.query(AlimentGenerique)
+        if depuis:
+            try:
+                q = q.filter(AlimentGenerique.date_creation >= datetime.fromisoformat(depuis))
+            except ValueError:
+                pass
+        lignes = q.order_by(AlimentGenerique.nom).all()
+        return {"total": len(lignes), "aliments": [{
+            "cle": a.nom_normalise, "nom": a.nom,
+            "calories": a.calories or 0, "proteines_g": a.proteines_g or 0,
+            "glucides_g": a.glucides_g or 0, "lipides_g": a.lipides_g or 0,
+            "fibres_g": a.fibres_g or 0,
+            "sucres_g": a.sucres_g, "ag_satures_g": a.ag_satures_g,
+            "portion_g": a.portion_g or 0, "portion_libelle": a.portion_libelle or "",
+            "utilisations": a.nombre_demandes or 0,
+        } for a in lignes]}
+    finally:
+        db.close()
+
+
 class AlimentPropose(Base):
     """Aliment saisi à la main par un utilisateur, en attente de validation.
 
