@@ -1003,6 +1003,25 @@ async def produit_partage(code_barres: str):
         db.close()
 
 
+@app.get("/produits-partages")
+async def produits_partages_tous():
+    """Toute la base commune des produits (fiches valides), pour que
+    chaque app la fouille EN LOCAL par le nom et la marque — jusqu'ici,
+    un produit partagé n'était atteignable qu'en scannant son code-barres.
+    Public, comme /produit/{code_barres} et /aliments-generiques : des
+    valeurs nutritionnelles, pas des données personnelles. Téléchargé au
+    plus une fois par heure par chaque app."""
+    if not engine:
+        return {"produits": [], "total": 0}
+    db = Session()
+    try:
+        lignes = db.query(ProduitPartage).filter(ProduitPartage.valide == True) \
+                   .order_by(ProduitPartage.nom).all()
+        return {"total": len(lignes), "produits": [_produit_vers_dict(p) for p in lignes]}
+    finally:
+        db.close()
+
+
 @app.post("/admin/importer-produits")
 async def importer_produits(req: LotProduitsRequete, x_admin_secret: str = Header(default="")):
     """Correction administrateur : écrase, et `valide: false` retire une
