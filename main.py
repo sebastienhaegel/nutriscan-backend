@@ -852,6 +852,25 @@ class ProduitPartage(Base):
     user_id = Column(String, default="")
     nombre_utilisations = Column(Integer, default=1)
     date_maj = Column(DateTime, default=datetime.utcnow)
+    # D'où vient la fiche : « utilisateur » (saisie ou corrigée par
+    # quelqu'un), « admin » (import), « off » (Open Food Facts en direct,
+    # automatique, jamais relue par un humain). L'humain prime : une
+    # fiche « off » est remplacée par la première saisie humaine.
+    source = Column(String, default="utilisateur")
+
+
+class CodeInconnu(Base):
+    """Un code-barres que personne — base commune, Open Food Facts — ne
+    connaît. Compté à chaque échec de scan : c'est la liste des produits
+    qu'il faut saisir, dans l'ordre où les utilisateurs les rencontrent.
+    Aucune donnée personnelle : le code, un compteur, deux dates."""
+    __tablename__ = "codes_inconnus"
+    code_barres = Column(String, primary_key=True)
+    nombre = Column(Integer, default=1)
+    premiere_date = Column(DateTime, default=datetime.utcnow)
+    derniere_date = Column(DateTime, default=datetime.utcnow)
+    # Vrai dès qu'une fiche existe (saisie, ou trouvée sur OFF plus tard).
+    resolu = Column(Boolean, default=False)
 
 
 class PortionCiqual(Base):
@@ -901,7 +920,8 @@ def _produit_vers_dict(p: ProduitPartage) -> dict:
             "glucides_g": p.glucides_g, "lipides_g": p.lipides_g,
             "sucres_g": p.sucres_g, "ag_satures_g": p.ag_satures_g, "fibres_g": p.fibres_g,
             "boisson": bool(p.boisson), "utilisations": p.nombre_utilisations,
-            "source": "communaute"}
+            "source": p.source or "utilisateur",
+            "date_maj": p.date_maj.isoformat() if p.date_maj else None}
 
 
 def _enregistrer_produits(db, produits: list, admin: bool = False) -> tuple[int, int]:
@@ -938,11 +958,119 @@ def _enregistrer_produits(db, produits: list, admin: bool = False) -> tuple[int,
         ligne.boisson = p.boisson
         if admin:
             ligne.valide = p.valide
+        ligne.source = "admin" if admin else "utilisateur"
         ligne.date_maj = datetime.utcnow()
         if not existant:
             db.add(ligne)
         enregistres += 1
+        _marquer_code_resolu(db, code)
     return enregistres, ignores
+
+
+def _marquer_code_resolu(db, code: str):
+    """Le code a désormais une fiche : il sort de la liste des manquants."""
+    try:
+        inconnu = db.query(CodeInconnu).filter(CodeInconnu.code_barres == code).first()
+        if inconnu and not inconnu.resolu:
+            inconnu.resolu = True
+    except Exception as e:
+        print(f"[codes-inconnus] marquage impossible : {e}")
+
+
+def _noter_code_inconnu(db, code: str):
+    """Un scan a échoué partout : on compte, sans rien d'autre."""
+    try:
+        inconnu = db.query(CodeInconnu).filter(CodeInconnu.code_barres == code).first()
+        if inconnu:
+            inconnu.nombre += 1
+            inconnu.derniere_date = datetime.utcnow()
+            inconnu.resolu = False
+        else:
+            db.add(CodeInconnu(code_barres=code))
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"[codes-inconnus] enregistrement impossible : {e}")
+
+
+# MARK: — Open Food Facts en direct
+
+OFF_USER_AGENT = "NutriScan/1.0 (haegel.s@hotmail.fr)"
+OFF_DELAI_S = 4.0
+# Une fiche automatique est redemandée à OFF passé ce délai : recettes
+# reformulées, portions changées. Une fiche humaine n'est jamais touchée.
+OFF_FRAICHEUR_JOURS = 180
+
+
+def _off_nombre(nutriments: dict, *cles):
+    for c in cles:
+        v = nutriments.get(c)
+        if isinstance(v, (int, float)):
+            return float(v)
+    return None
+
+
+async def _fiche_off_en_direct(code: str):
+    """Interroge Open Food Facts pour un code et renvoie un ProduitPartage
+    (non ajouté) si la fiche est COMPLÈTE et COHÉRENTE — ou None.
+
+    Complète : énergie et les quatre macros pour 100 g. Cohérente :
+    4·P + 4·G + 9·L ne s'écarte pas de plus de 35 % des kcal (alcool et
+    polyols expliquent l'écart toléré). Une fiche OFF incomplète est
+    pire qu'une absence : elle bloquerait la saisie manuelle.
+    """
+    try:
+        import httpx  # dépendance du SDK anthropic, toujours présente
+        url = (f"https://world.openfoodfacts.org/api/v2/product/{code}"
+               "?fields=product_name,product_name_fr,brands,quantity,nutriments,categories_tags")
+        async with httpx.AsyncClient(timeout=OFF_DELAI_S,
+                                     headers={"User-Agent": OFF_USER_AGENT}) as client:
+            r = await client.get(url)
+        if r.status_code != 200:
+            return None
+        j = r.json()
+        if j.get("status") != 1 or not isinstance(j.get("product"), dict):
+            return None
+        prod = j["product"]
+        n = prod.get("nutriments") or {}
+        kcal = _off_nombre(n, "energy-kcal_100g")
+        if kcal is None:
+            kj = _off_nombre(n, "energy-kj_100g", "energy_100g")
+            kcal = kj / 4.184 if kj else None
+        prot = _off_nombre(n, "proteins_100g")
+        gluc = _off_nombre(n, "carbohydrates_100g")
+        lip = _off_nombre(n, "fat_100g")
+        if kcal is None or kcal <= 0 or None in (prot, gluc, lip):
+            return None
+        if kcal > 950 or prot > 100 or gluc > 100 or lip > 100:
+            return None
+        attendu = 4 * prot + 4 * gluc + 9 * lip
+        if attendu > 0 and abs(attendu - kcal) > 0.35 * max(kcal, 20):
+            print(f"[off-direct] {code} rejeté : {kcal:.0f} kcal pour P{prot} G{gluc} L{lip}")
+            return None
+        nom = (prod.get("product_name_fr") or prod.get("product_name") or "").strip()
+        if len(nom) < 2:
+            return None
+        quantite = (prod.get("quantity") or "").strip()
+        categories = prod.get("categories_tags") or []
+        boisson = any("beverage" in c or "boisson" in c for c in categories) \
+            or bool(re.search(r"\b(ml|cl|l)\b", quantite.lower()))
+        fiche = ProduitPartage(
+            code_barres=code, nom=nom[:120],
+            marque=(prod.get("brands") or "").split(",")[0].strip()[:60],
+            quantite=quantite[:40],
+            categorie="Boissons" if boisson else "Autre",
+            energie_kcal=round(kcal, 1), proteines_g=round(prot, 1),
+            glucides_g=round(gluc, 1), lipides_g=round(lip, 1),
+            sucres_g=_off_nombre(n, "sugars_100g"),
+            ag_satures_g=_off_nombre(n, "saturated-fat_100g"),
+            fibres_g=_off_nombre(n, "fiber_100g"),
+            boisson=boisson, valide=True, user_id="", source="off",
+            nombre_utilisations=1, date_maj=datetime.utcnow())
+        return fiche
+    except Exception as e:
+        print(f"[off-direct] {code} : {type(e).__name__}: {e}")
+        return None
 
 
 @app.post("/produit-partage")
@@ -987,18 +1115,150 @@ async def partager_produits_lot(req: LotProduitsRequete):
 @app.get("/produit/{code_barres}")
 async def produit_partage(code_barres: str):
     """La fiche commune d'un code-barres, ou 404. Consultée par l'app
-    avant Open Food Facts."""
+    avant son extrait Open Food Facts embarqué.
+
+    Trois temps :
+      1. la base commune (fiche humaine, ou fiche OFF déjà rapatriée) ;
+      2. sinon Open Food Facts EN DIRECT : si la fiche est complète et
+         cohérente, elle est enregistrée (source « off ») et servie —
+         le produit scanné une fois par quelqu'un existe pour tous ;
+      3. sinon le code est compté dans `codes_inconnus`, et 404 : l'app
+         passe à son extrait local puis à la saisie manuelle.
+    Une fiche « off » de plus de six mois est redemandée au passage.
+    """
+    if not engine:
+        raise HTTPException(status_code=503, detail="Base indisponible")
+    code = code_barres.strip()
+    db = Session()
+    try:
+        p = db.query(ProduitPartage).filter(ProduitPartage.code_barres == code,
+                                            ProduitPartage.valide == True).first()
+        if p and p.source == "off" and p.date_maj and \
+                (datetime.utcnow() - p.date_maj).days > OFF_FRAICHEUR_JOURS:
+            fraiche = await _fiche_off_en_direct(code)
+            if fraiche:
+                for c in ("nom", "marque", "quantite", "categorie", "energie_kcal", "proteines_g",
+                          "glucides_g", "lipides_g", "sucres_g", "ag_satures_g", "fibres_g", "boisson"):
+                    setattr(p, c, getattr(fraiche, c))
+                p.date_maj = datetime.utcnow()
+                print(f"[off-direct] {code} rafraîchi : {p.nom}")
+        if not p:
+            if not _code_barres_valide(code):
+                raise HTTPException(status_code=404, detail="Code invalide")
+            p = await _fiche_off_en_direct(code)
+            if p:
+                # Une fiche dévalidée par l'administrateur ne revient pas
+                # par la porte de derrière.
+                existante = db.query(ProduitPartage).filter(ProduitPartage.code_barres == code).first()
+                if existante:
+                    raise HTTPException(status_code=404, detail="Produit retiré")
+                db.add(p)
+                _marquer_code_resolu(db, code)
+                print(f"[off-direct] {code} rapatrié : {p.nom} ({p.marque}), {p.energie_kcal:.0f} kcal")
+            else:
+                _noter_code_inconnu(db, code)
+                raise HTTPException(status_code=404, detail="Produit inconnu")
+        else:
+            p.nombre_utilisations += 1
+        db.commit()
+        return _produit_vers_dict(p)
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"[produit] {code} : {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Erreur serveur")
+    finally:
+        db.close()
+
+
+@app.get("/admin/codes-inconnus")
+async def codes_inconnus_json(inclure_resolus: bool = False, limite: int = 500,
+                              x_admin_secret: str = Header(default="")):
+    """Les codes-barres que personne ne connaît, les plus demandés d'abord."""
+    attendu = os.environ.get("ADMIN_SECRET", "")
+    if not attendu or x_admin_secret != attendu:
+        raise HTTPException(status_code=403, detail="Accès refusé")
     if not engine:
         raise HTTPException(status_code=503, detail="Base indisponible")
     db = Session()
     try:
-        p = db.query(ProduitPartage).filter(ProduitPartage.code_barres == code_barres.strip(),
-                                            ProduitPartage.valide == True).first()
-        if not p:
-            raise HTTPException(status_code=404, detail="Produit inconnu")
-        p.nombre_utilisations += 1
-        db.commit()
-        return _produit_vers_dict(p)
+        q = db.query(CodeInconnu)
+        if not inclure_resolus:
+            q = q.filter(CodeInconnu.resolu == False)
+        lignes = q.order_by(CodeInconnu.nombre.desc(), CodeInconnu.derniere_date.desc()).limit(limite).all()
+        return {"codes": [{"code_barres": c.code_barres, "nombre": c.nombre, "resolu": bool(c.resolu),
+                           "premiere_date": c.premiere_date.isoformat() if c.premiere_date else None,
+                           "derniere_date": c.derniere_date.isoformat() if c.derniere_date else None}
+                          for c in lignes]}
+    finally:
+        db.close()
+
+
+@app.get("/admin/codes-inconnus/page", response_class=HTMLResponse)
+async def codes_inconnus_page(cle: str = ""):
+    """La même liste, lisible dans un navigateur, avec pour chaque code un
+    lien vers sa page Open Food Facts et un bouton « Réessayer OFF »."""
+    attendu = os.environ.get("ADMIN_SECRET", "")
+    if not attendu or cle != attendu:
+        return HTMLResponse("<h1>Accès refusé</h1>", status_code=403)
+    if not engine:
+        return HTMLResponse("<h1>Base de données non disponible</h1>")
+    import html as _html
+    e = _html.escape
+    db = Session()
+    try:
+        lignes = db.query(CodeInconnu).filter(CodeInconnu.resolu == False) \
+                   .order_by(CodeInconnu.nombre.desc(), CodeInconnu.derniere_date.desc()).limit(300).all()
+        resolus = db.query(CodeInconnu).filter(CodeInconnu.resolu == True).count()
+        rows = "".join(
+            f"<tr><td><code>{e(c.code_barres)}</code></td><td style='text-align:right'>{c.nombre}</td>"
+            f"<td>{c.premiere_date.strftime('%d/%m') if c.premiere_date else ''}</td>"
+            f"<td>{c.derniere_date.strftime('%d/%m') if c.derniere_date else ''}</td>"
+            f"<td><a href='https://fr.openfoodfacts.org/produit/{e(c.code_barres)}' target='_blank'>OFF</a> · "
+            f"<a href='/admin/codes-inconnus/reessayer/{e(c.code_barres)}?cle={e(cle)}'>Réessayer</a></td></tr>"
+            for c in lignes)
+        return HTMLResponse(f"""<!doctype html><html lang="fr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Codes inconnus</title>
+<style>body{{font-family:-apple-system,sans-serif;margin:24px;max-width:720px}}table{{border-collapse:collapse;width:100%}}
+td,th{{padding:6px 8px;border-bottom:1px solid #ddd;text-align:left}}</style></head><body>
+<h1>Codes-barres inconnus</h1>
+<p>{len(lignes)} en attente · {resolus} résolus depuis. Les plus scannés d'abord : ce sont les produits à saisir en priorité
+(scan dans l'app → « Saisir l'étiquette »), ou à retrouver sur Open Food Facts quand la fiche y a été complétée depuis.</p>
+<table><tr><th>Code</th><th>Scans</th><th>Premier</th><th>Dernier</th><th></th></tr>{rows or "<tr><td colspan=5>Aucun.</td></tr>"}</table>
+</body></html>""")
+    finally:
+        db.close()
+
+
+@app.get("/admin/codes-inconnus/reessayer/{code_barres}", response_class=HTMLResponse)
+async def codes_inconnus_reessayer(code_barres: str, cle: str = ""):
+    """Redemande la fiche à Open Food Facts ; si elle est devenue
+    complète, elle entre dans la base commune et le code est résolu."""
+    attendu = os.environ.get("ADMIN_SECRET", "")
+    if not attendu or cle != attendu:
+        return HTMLResponse("<h1>Accès refusé</h1>", status_code=403)
+    if not engine:
+        return HTMLResponse("<h1>Base de données non disponible</h1>")
+    code = code_barres.strip()
+    db = Session()
+    try:
+        if db.query(ProduitPartage).filter(ProduitPartage.code_barres == code).first():
+            _marquer_code_resolu(db, code)
+            db.commit()
+            message = "Une fiche existe déjà pour ce code : marqué résolu."
+        else:
+            p = await _fiche_off_en_direct(code)
+            if p:
+                db.add(p)
+                _marquer_code_resolu(db, code)
+                db.commit()
+                message = f"Fiche rapatriée : {p.nom} ({p.marque}), {p.energie_kcal:.0f} kcal / 100 g."
+            else:
+                message = "Open Food Facts ne connaît pas ce produit, ou sa fiche est incomplète."
+        retour = f"/admin/codes-inconnus/page?cle={cle}"
+        return HTMLResponse(f"<!doctype html><meta charset='utf-8'><body style='font-family:-apple-system,sans-serif;margin:24px'>"
+                            f"<p>{message}</p><p><a href='{retour}'>← Retour à la liste</a></p></body>")
     finally:
         db.close()
 
@@ -2160,6 +2420,7 @@ if engine:
             conn.execute(_text("ALTER TABLE corrections_pending ADD COLUMN IF NOT EXISTS fibres_corrige INTEGER"))
             conn.execute(_text("ALTER TABLE aliments_proposes ADD COLUMN IF NOT EXISTS sucres_g INTEGER"))
             conn.execute(_text("ALTER TABLE aliments_proposes ADD COLUMN IF NOT EXISTS ag_satures_g INTEGER"))
+            conn.execute(_text("ALTER TABLE produits_partages ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'utilisateur'"))
     except Exception as e:
         print(f"[aliments_generiques] migration impossible : {e}")
 
