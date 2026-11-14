@@ -995,7 +995,9 @@ def _noter_code_inconnu(db, code: str):
 
 # MARK: — Open Food Facts en direct
 
-OFF_USER_AGENT = "NutriScan/1.0 (haegel.s@hotmail.fr)"
+# OFF demande un contact dans le User-Agent : il vient de la variable
+# d'environnement OFF_CONTACT (Railway → Variables), jamais du code.
+OFF_USER_AGENT = f"Couleur/1.0 ({os.environ.get('OFF_CONTACT', 'contact: voir fiche App Store')})"
 OFF_DELAI_S = 4.0
 # Une fiche automatique est redemandée à OFF passé ce délai : recettes
 # reformulées, portions changées. Une fiche humaine n'est jamais touchée.
@@ -1954,7 +1956,8 @@ Propose 3 recettes SIMPLES en JSON :
 
 Pour "quantites" : le grammage de CHAQUE ingrédient utilisé, pour la recette entière (pas par personne). Un ingrédient en pièces — un œuf, une pomme — se note en grammes quand même (un œuf : 55 g, une pomme : 150 g).
 Règles : max 5 ingrédients, au moins 1 légume/fruit, moins de 20 minutes."""
-        response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=2048, messages=[{"role": "user", "content": prompt}])
+        response = await anthropic.AsyncAnthropic(api_key=os.environ.get("ANTHROPIC_API_KEY")).messages.create(
+            model="claude-haiku-4-5-20251001", max_tokens=2048, messages=[{"role": "user", "content": prompt}])
         return parser_json_claude(response, defaut={"recettes": []}, contexte="recipe")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -2883,14 +2886,69 @@ class SuggererRepasRequest(BaseModel):
     nombre_personnes: int = 1
 
 
+# --- Suggestions de repas : vitesse ---------------------------------------
+# Trois recettes complètes, c'est 1 200 à 1 800 tokens de sortie. Avec
+# Sonnet (~60 tokens/s) ça fait 20 à 30 s ; Haiku 4.5 en met 6 à 10. Le
+# modèle est donc Haiku par défaut, réglable sans redéploiement par la
+# variable MODELE_SUGGESTIONS. Et comme le frigo ne change pas entre deux
+# ouvertures de l'onglet, la réponse est gardée en mémoire quelques
+# heures : la seconde demande identique revient en quelques millisecondes.
+MODELE_SUGGESTIONS = os.environ.get("MODELE_SUGGESTIONS", "claude-haiku-4-5-20251001")
+CACHE_SUGGESTIONS_SECONDES = int(os.environ.get("CACHE_SUGGESTIONS_SECONDES", "21600"))  # 6 h
+_cache_suggestions: dict[str, tuple[float, dict]] = {}
+# Plafond par utilisateur et par 24 h — seuls les VRAIS appels à Claude
+# comptent, pas les réponses servies depuis le cache. Avec Haiku, un
+# appel coûte environ 1 centime : 10 par jour, c'est 10 c au pire pour
+# l'utilisateur le plus assidu.
+MAX_SUGGESTIONS_PAR_JOUR = int(os.environ.get("MAX_SUGGESTIONS_PAR_JOUR", "10"))
+_appels_suggestions: dict[str, list[float]] = defaultdict(list)
+
+
+def _quota_suggestions(user_id: str) -> int:
+    """Appels restants sur 24 h glissantes pour cet utilisateur."""
+    hier = time.time() - 86400
+    _appels_suggestions[user_id] = [t for t in _appels_suggestions[user_id] if t > hier]
+    return max(0, MAX_SUGGESTIONS_PAR_JOUR - len(_appels_suggestions[user_id]))
+
+
+def _cle_suggestions(req: "SuggererRepasRequest", cible: int) -> str:
+    """Même frigo, même moment, même budget (à 100 kcal près) → même réponse."""
+    return json.dumps({
+        "frigo": sorted(a.strip().lower() for a in req.aliments_frigo),
+        "recents": sorted(r.strip().lower() for r in req.repas_recents),
+        "cat": req.categorie, "n": req.nombre_personnes, "kcal": round(cible / 100),
+        "goal": req.goal, "age": req.age // 10, "gender": req.gender,
+    }, ensure_ascii=False, sort_keys=True)
+
+
+def _cache_lire(cle: str):
+    entree = _cache_suggestions.get(cle)
+    if not entree:
+        return None
+    horodatage, valeur = entree
+    if time.time() - horodatage > CACHE_SUGGESTIONS_SECONDES:
+        _cache_suggestions.pop(cle, None)
+        return None
+    return valeur
+
+
+def _cache_ecrire(cle: str, valeur: dict):
+    if len(_cache_suggestions) > 300:
+        plus_ancienne = min(_cache_suggestions, key=lambda k: _cache_suggestions[k][0])
+        _cache_suggestions.pop(plus_ancienne, None)
+    _cache_suggestions[cle] = (time.time(), valeur)
+
+
 @app.post("/suggerer-repas")
-async def suggerer_repas(req: SuggererRepasRequest):
+async def suggerer_repas(req: SuggererRepasRequest, force: bool = False):
     """Trois propositions de repas, structurées comme une analyse.
 
     Même contrat que /analyze pour les ingrédients : nommés à la façon
     de Ciqual, avec grammages et macros. C'est ce qui permet à l'app de
     les résoudre localement et de les enregistrer comme n'importe quel
     repas — modifiables, partageables, avec leur composition.
+
+    `?force=true` ignore le cache (bouton « d'autres idées » côté app).
     """
     frigo = ", ".join(req.aliments_frigo) if req.aliments_frigo else "rien de renseigné"
     recents = ", ".join(req.repas_recents) if req.repas_recents else "aucun"
@@ -2899,6 +2957,20 @@ async def suggerer_repas(req: SuggererRepasRequest):
     cible = req.calories_restantes if req.calories_restantes > 150 else {
         "Petit-déjeuner": 450, "Déjeuner": 700, "Dîner": 600, "Collation": 200,
     }.get(req.categorie, 600)
+
+    cle = _cle_suggestions(req, cible)
+    if not force:
+        en_cache = _cache_lire(cle)
+        if en_cache is not None:
+            print(f"[suggerer-repas] cache : {len(en_cache.get('propositions', []))} proposition(s) pour {req.categorie}")
+            return en_cache
+
+    restants = _quota_suggestions(req.user_id)
+    if restants <= 0:
+        print(f"[suggerer-repas] quota atteint pour {req.user_id}")
+        raise HTTPException(status_code=429,
+                            detail=f"Limite de {MAX_SUGGESTIONS_PAR_JOUR} suggestions par jour atteinte ; réessayez demain.")
+    _appels_suggestions[req.user_id].append(time.time())
 
     prompt = f"""Tu es un cuisinier et nutritionniste qui propose de VRAIS PLATS
 CUISINÉS, avec leur recette — pas des assemblages d'ingrédients posés
@@ -2974,11 +3046,17 @@ Réponds UNIQUEMENT en JSON valide, sans backticks :
   }}
 ]}}"""
 
+    debut = time.time()
     try:
-        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-        response = client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=3500,
+        # Client asynchrone : pendant les secondes que Claude met à
+        # répondre, le serveur continue de servir les autres requêtes
+        # (un appel synchrone dans une route async bloque TOUT le
+        # serveur — chaque ticket de caisse en cours faisait attendre les
+        # suggestions de tout le monde).
+        client = anthropic.AsyncAnthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        response = await client.messages.create(
+            model=MODELE_SUGGESTIONS,
+            max_tokens=3000,
             messages=[{"role": "user", "content": prompt}],
         )
         brut = parser_json_claude(response, defaut={"propositions": []},
@@ -3020,9 +3098,15 @@ Réponds UNIQUEMENT en JSON valide, sans backticks :
             "ingredients": ingredients,
         })
 
+    usage = getattr(response, "usage", None)
     print(f"[suggerer-repas] {len(propositions)} proposition(s) pour {req.categorie}, "
-          f"frigo {len(req.aliments_frigo)} article(s)")
-    return {"propositions": propositions}
+          f"frigo {len(req.aliments_frigo)} article(s), {MODELE_SUGGESTIONS}, "
+          f"{time.time() - debut:.1f} s"
+          + (f", {usage.output_tokens} tokens de sortie" if usage else ""))
+    resultat = {"propositions": propositions}
+    if propositions:
+        _cache_ecrire(cle, resultat)
+    return resultat
 
 
 class AchatFrequent(BaseModel):
