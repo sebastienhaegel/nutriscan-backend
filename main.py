@@ -134,6 +134,39 @@ def enregistrer_appel(user_id: str):
     user_analyses[user_id].append(time.time())
 
 
+# MARK: — Langue de l'utilisateur
+#
+# L'app envoie `langue` (« fr », « en », parfois « en-US ») dans les
+# requêtes dont la réponse contient du texte lu par l'utilisateur :
+# noms de plats, descriptions, verdicts, conseils, raisons d'achat,
+# étapes de recette. Ces textes sont rédigés dans sa langue.
+#
+# Ce qui ne change JAMAIS de langue, quelle que soit la demande :
+#   • les clés JSON ;
+#   • les NOMS D'INGRÉDIENTS des analyses et des suggestions de repas,
+#     nommés à la façon de la table Ciqual de l'Anses — l'app les
+#     résout localement dans ciqual.sqlite, un nom anglais échouerait ;
+#   • les codes stockés (« entree », « Lundi », catégories de frigo).
+LANGUES = {"fr": "français", "en": "anglais"}
+
+
+def _langue(code: str | None) -> str:
+    """« fr » ou « en » (défaut fr) depuis ce qu'envoie l'app."""
+    c = (code or "fr").strip().lower()[:2]
+    return c if c in LANGUES else "fr"
+
+
+def consigne_langue(langue: str, champs: str) -> str:
+    """Paragraphe à insérer dans un prompt. Vide en français : les prompts
+    sont écrits en français et Claude répond naturellement en français."""
+    langue = _langue(langue)
+    if langue == "fr":
+        return ""
+    return f"""
+LANGUE : l'utilisateur lit l'application en {LANGUES[langue]}. Rédige en
+{LANGUES[langue]} {champs}. Les clés JSON restent telles quelles."""
+
+
 # MARK: — Modèles Pydantic
 class AnalyzeRequest(BaseModel):
     image_base64: str
@@ -144,6 +177,7 @@ class AnalyzeRequest(BaseModel):
     poids_plat: int
     nom_plat: str | None = None
     user_id: str = "anonymous"
+    langue: str = "fr"
 
 class SuggestionsRequest(BaseModel):
     prompt: str
@@ -153,13 +187,16 @@ class NextMealRequest(BaseModel):
     score: int
     nutrients: list
     aliments_frigo: list[str] = []
+    langue: str = "fr"
 
 class ScanInventoryRequest(BaseModel):
     image_base64: str
+    langue: str = "fr"
 
 class RecipeRequest(BaseModel):
     aliments: list[str]
     aliment_principal: str | None = None
+    langue: str = "fr"
 
 class CorrectionRequest(BaseModel):
     nom_original: str
@@ -177,13 +214,16 @@ class CorrectionRequest(BaseModel):
 class ScanMenuRequest(BaseModel):
     image_base64: str
     semaine: str
+    langue: str = "fr"
 
 class AnalysePlatCantineRequest(BaseModel):
     nom_plat: str
     type_plat: str
+    langue: str = "fr"
 
 class ScanReceiptRequest(BaseModel):
     prompt: str
+    langue: str = "fr"
 
 
 # MARK: — Normalisation numérique
@@ -1754,10 +1794,15 @@ async def analyze(req: AnalyzeRequest):
         indication_plat = ""
         if req.nom_plat:
             indication_plat = f"\nL'application a identifié ce plat comme étant : {req.nom_plat}. Utilise ce nom si tu es d'accord, sinon corrige-le.\n"
+        langue = _langue(req.langue)
+        consigne = consigne_langue(langue,
+            "« nom », « description », « verdict », « commentaire », « conseils » et le "
+            "« nom » de chaque entrée de « nutrients ». EXCEPTION : le « nom » de chaque "
+            "entrée de « ingredients » reste en FRANÇAIS, à la façon de Ciqual (voir plus bas).")
         prompt = f"""Tu es un expert en nutrition. Analyse la photo de ce repas et réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown).
 Profil : {req.gender}, {req.age} ans, {req.weight} kg, objectif: {req.goal}.
 Poids total du plat servi sur la photo : {req.poids_plat} grammes.
-{indication_plat}
+{indication_plat}{consigne}
 Retourne exactement ce format JSON :
 {{"nom": "Nom du plat identifié", "description": "Description courte (1-2 phrases)", "score": 72, "verdict": "Titre du bilan", "commentaire": "Commentaire personnalisé (2-3 phrases)", "macros": {{"calories": 650, "proteines_g": 35, "glucides_g": 70, "lipides_g": 22, "sucres_g": 6, "ag_satures_g": 5, "fibres_g": 7}}, "ingredients": [{{"nom": "Riz blanc cuit", "grammes": 150, "calories": 195, "proteines_g": 4, "glucides_g": 42, "lipides_g": 1, "sucres_g": 0, "ag_satures_g": 0, "fibres_g": 1}}, {{"nom": "Poulet, blanc, cuit", "grammes": 120, "calories": 180, "proteines_g": 36, "glucides_g": 0, "lipides_g": 4, "sucres_g": 0, "ag_satures_g": 1, "fibres_g": 0}}], "nutrients": [{{"nom": "Protéines", "pct": 65, "niveau": "medium"}}, {{"nom": "Glucides", "pct": 85, "niveau": "good"}}, {{"nom": "Lipides", "pct": 45, "niveau": "low"}}, {{"nom": "Fibres", "pct": 30, "niveau": "low"}}, {{"nom": "Vitamines", "pct": 70, "niveau": "medium"}}, {{"nom": "Minéraux", "pct": 55, "niveau": "medium"}}], "conseils": ["Conseil 1", "Conseil 2", "Conseil 3"]}}
 
@@ -1805,7 +1850,11 @@ Les valeurs macros doivent correspondre au poids total de {req.poids_plat}g."""
         else:
             print("[analyze] ⚠️ aucun ingrédient dans la réponse")
 
-        sauvegarder_plat_partage(result)
+        # La base des plats partagés est indexée par NOM français : un
+        # plat analysé en anglais n'y a pas sa place (il ne serait jamais
+        # retrouvé, et polluerait les corrections de l'administrateur).
+        if langue == "fr":
+            sauvegarder_plat_partage(result)
         result["quota"] = {"restants": MAX_ANALYSES_PAR_JOUR - len(user_analyses[req.user_id]), "maximum": MAX_ANALYSES_PAR_JOUR}
         return result
     except HTTPException:
@@ -1936,7 +1985,7 @@ async def next_meal(req: NextMealRequest):
 Apports : {nutrients_str}.
 Aliments disponibles : {frigo_str}.
 Suggère UN SEUL repas idéal. Réponds UNIQUEMENT en JSON :
-{{"nom": "Nom du repas", "description": "Description (1-2 phrases)", "raison": "Pourquoi ce repas complète le précédent", "ingredients": ["ingrédient 1", "ingrédient 2", "ingrédient 3"]}}"""
+{{"nom": "Nom du repas", "description": "Description (1-2 phrases)", "raison": "Pourquoi ce repas complète le précédent", "ingredients": ["ingrédient 1", "ingrédient 2", "ingrédient 3"]}}{consigne_langue(req.langue, "tous les textes (nom, description, raison, ingredients)")}"""
         response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=1024, messages=[{"role": "user", "content": prompt}])
         return parser_json_claude(response, defaut={}, contexte="next-meal")
     except Exception as e:
@@ -1949,7 +1998,9 @@ async def scan_inventory(req: ScanInventoryRequest):
         prompt = """Analyse cette photo et identifie tous les aliments visibles.
 Réponds UNIQUEMENT en JSON :
 {"aliments": [{ "nom": "Nom", "quantite": "500g", "categorie": "Légumes" }]}
-Catégories : "Légumes", "Fruits", "Viandes/Poissons", "Produits laitiers", "Féculents", "Épicerie", "Boissons", "Autre"."""
+Catégories : "Légumes", "Fruits", "Viandes/Poissons", "Produits laitiers", "Féculents", "Épicerie", "Boissons", "Autre".""" + consigne_langue(
+            req.langue, "le « nom » de chaque aliment. Les valeurs de « categorie » restent "
+                        "EXACTEMENT celles de la liste ci-dessus, en français : ce sont des codes.")
         response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=2000, messages=[{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": req.image_base64}}, {"type": "text", "text": prompt}]}])
         return parser_json_claude(response, defaut={"aliments": []}, contexte="scan-inventory")
     except Exception as e:
@@ -1967,7 +2018,7 @@ Propose 3 recettes SIMPLES en JSON :
 {{"recettes": [{{"nom": "Nom", "description": "Description", "temps_minutes": 20, "ingredients_utilises": ["ing1"], "ingredients_manquants": ["ing2"], "quantites": [{{"nom": "ing1", "grammes": 150}}]}}]}}
 
 Pour "quantites" : le grammage de CHAQUE ingrédient utilisé, pour la recette entière (pas par personne). Un ingrédient en pièces — un œuf, une pomme — se note en grammes quand même (un œuf : 55 g, une pomme : 150 g).
-Règles : max 5 ingrédients, au moins 1 légume/fruit, moins de 20 minutes."""
+Règles : max 5 ingrédients, au moins 1 légume/fruit, moins de 20 minutes.{consigne_langue(req.langue, "le nom, la description et les ingrédients manquants. Dans « ingredients_utilises » et « quantites », reprends les aliments EXACTEMENT comme ils sont écrits dans la liste des aliments disponibles, sans les traduire : l'app les rapproche du contenu du frigo.")}"""
         response = await anthropic.AsyncAnthropic(api_key=os.environ.get("ANTHROPIC_API_KEY")).messages.create(
             model="claude-haiku-4-5-20251001", max_tokens=2048, messages=[{"role": "user", "content": prompt}])
         return parser_json_claude(response, defaut={"recettes": []}, contexte="recipe")
@@ -1984,7 +2035,10 @@ La semaine est : {req.semaine}
 Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
 {{"semaine": "{req.semaine}", "jours": [{{"jour": "Lundi", "date": "2024-01-15", "plats": [{{"nom": "Carottes râpées", "type_plat": "entree"}}, {{"nom": "Poulet rôti", "type_plat": "plat"}}, {{"nom": "Haricots verts", "type_plat": "accompagnement"}}, {{"nom": "Yaourt", "type_plat": "dessert"}}]}}]}}
 Types possibles : "entree", "plat", "accompagnement", "dessert", "laitage", "pain"
-Inclus uniquement les jours de semaine (Lundi à Vendredi)."""
+Inclus uniquement les jours de semaine (Lundi à Vendredi).
+Le champ "jour" est un code : TOUJOURS "Lundi", "Mardi", "Mercredi", "Jeudi" ou
+"Vendredi", en français, même si le menu est écrit dans une autre langue.
+Les noms de plats sont recopiés tels qu'ils figurent sur le menu."""
         response = client.messages.create(model="claude-sonnet-4-5", max_tokens=3000, messages=[{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": req.image_base64}}, {"type": "text", "text": prompt}]}])
         return parser_json_claude(response, defaut={"semaine": req.semaine, "jours": []}, contexte="scan-menu")
     except Exception as e:
@@ -2002,7 +2056,7 @@ Plat : {req.nom_plat}
 Type : {req.type_plat}
 Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
 {{"nom": "{req.nom_plat}", "calories": 250, "proteines_g": 15, "glucides_g": 30, "lipides_g": 8, "score": 72, "verdict": "Bon apport nutritionnel", "conseils": ["Conseil 1", "Conseil 2"]}}
-Base-toi sur une portion standard de cantine scolaire (portion enfant)."""
+Base-toi sur une portion standard de cantine scolaire (portion enfant).{consigne_langue(req.langue, "« verdict » et « conseils ». Le « nom » reste celui du plat tel que donné.")}"""
         response = client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=1024, messages=[{"role": "user", "content": prompt}])
         return parser_json_claude(response, defaut={}, contexte="plat-cantine")
     except Exception as e:
@@ -2017,7 +2071,13 @@ async def scan_receipt(req: ScanReceiptRequest):
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
         prompt = req.prompt if req.prompt else """Analyse ce ticket de caisse et retourne UNIQUEMENT:
 [{"nom": "Produit", "quantite": "100g", "categorie": "Legumes"}]"""
-        
+        # Le prompt vient de l'app ; la consigne de langue s'y ajoute. Les
+        # catégories sont des codes stockés par l'app, elles ne bougent pas.
+        prompt += consigne_langue(req.langue,
+            "le « nom » de chaque produit (nom lisible du produit, pas le libellé "
+            "de caisse). Les valeurs de « categorie » restent EXACTEMENT celles "
+            "demandées ci-dessus : ce sont des codes.")
+
         response = client.messages.create(
             model="claude-sonnet-4-5",
             # Sonnet plutôt que Haiku : les libellés de caisse sont des codes
@@ -2140,12 +2200,50 @@ class ScoreAliment(Base):
     verdict = Column(String, default="")
     commentaire = Column(Text, default="")
     conseils = Column(Text, default="[]")
+    # Les mêmes textes en anglais. Le SCORE ne dépend pas de la langue et
+    # n'est calculé qu'une fois ; les textes, eux, sont rédigés une fois
+    # par langue, à la première demande dans cette langue.
+    verdict_en = Column(String, default="")
+    commentaire_en = Column(Text, default="")
+    conseils_en = Column(Text, default="[]")
     date_creation = Column(DateTime, default=datetime.utcnow)
     nombre_demandes = Column(Integer, default=1)
 
 
 if engine:
     Base.metadata.create_all(engine)
+    try:
+        from sqlalchemy import text as _text
+        with engine.begin() as conn:
+            conn.execute(_text("ALTER TABLE scores_aliments ADD COLUMN IF NOT EXISTS verdict_en VARCHAR DEFAULT ''"))
+            conn.execute(_text("ALTER TABLE scores_aliments ADD COLUMN IF NOT EXISTS commentaire_en TEXT DEFAULT ''"))
+            conn.execute(_text("ALTER TABLE scores_aliments ADD COLUMN IF NOT EXISTS conseils_en TEXT DEFAULT '[]'"))
+    except Exception as e:
+        print(f"[scores_aliments] migration impossible : {e}")
+
+
+def _textes_score(connu: "ScoreAliment", langue: str):
+    """(verdict, commentaire, conseils) en cache pour cette langue, ou None
+    s'ils n'ont pas encore été rédigés dans cette langue."""
+    if langue == "en":
+        verdict, commentaire, conseils = connu.verdict_en, connu.commentaire_en, connu.conseils_en
+    else:
+        verdict, commentaire, conseils = connu.verdict, connu.commentaire, connu.conseils
+    if not (verdict or "").strip():
+        return None
+    try:
+        liste = json.loads(conseils) if conseils else []
+    except Exception:
+        liste = []
+    return verdict, commentaire, liste
+
+
+def _ecrire_textes_score(connu: "ScoreAliment", langue: str, resultat: dict):
+    conseils = json.dumps(resultat["conseils"], ensure_ascii=False)
+    if langue == "en":
+        connu.verdict_en, connu.commentaire_en, connu.conseils_en = resultat["verdict"], resultat["commentaire"], conseils
+    else:
+        connu.verdict, connu.commentaire, connu.conseils = resultat["verdict"], resultat["commentaire"], conseils
 
 
 class ScoreAlimentRequest(BaseModel):
@@ -2168,6 +2266,7 @@ class ScoreAlimentRequest(BaseModel):
     sucres_g: int | None = None
     ag_satures_g: int | None = None
     marque: str = ""
+    langue: str = "fr"
 
 
 def _contexte_score(req: "ScoreAlimentRequest") -> tuple[str, str]:
@@ -2206,8 +2305,14 @@ async def score_aliment(req: ScoreAlimentRequest, force: bool = False):
 
     if not req.source_code:
         raise HTTPException(status_code=400, detail="source_code requis")
+    langue = _langue(req.langue)
 
     # ---- 1. Le cache -------------------------------------------------
+    # Le score est connu dès la première demande, toutes langues confondues.
+    # Les textes ne le sont que dans la langue où ils ont été rédigés : si
+    # cette langue manque, Claude est rappelé pour les textes seulement,
+    # avec le score déjà fixé.
+    score_connu = None
     if engine and not force:
         session = Session()
         try:
@@ -2216,14 +2321,13 @@ async def score_aliment(req: ScoreAlimentRequest, force: bool = False):
             if connu:
                 connu.nombre_demandes += 1
                 session.commit()
-                print(f"[score-aliment] cache : {connu.nom} = {connu.score}")
-                return {
-                    "score": connu.score,
-                    "verdict": connu.verdict,
-                    "commentaire": connu.commentaire,
-                    "conseils": json.loads(connu.conseils) if connu.conseils else [],
-                    "cache": True,
-                }
+                textes = _textes_score(connu, langue)
+                if textes:
+                    print(f"[score-aliment] cache ({langue}) : {connu.nom} = {connu.score}")
+                    return {"score": connu.score, "verdict": textes[0],
+                            "commentaire": textes[1], "conseils": textes[2], "cache": True}
+                score_connu = connu.score
+                print(f"[score-aliment] score en cache, textes à rédiger en {langue} : {connu.nom}")
         except Exception as e:
             print(f"[score-aliment] lecture cache impossible : {e}")
         finally:
@@ -2231,6 +2335,9 @@ async def score_aliment(req: ScoreAlimentRequest, force: bool = False):
 
     # ---- 2. Claude ---------------------------------------------------
     provenance, consigne = _contexte_score(req)
+    consigne_textes = consigne_langue(langue, "« verdict », « commentaire » et « conseils »")
+    consigne_score = (f"\nLe score est DÉJÀ fixé à {score_connu} : reprends-le tel quel et "
+                      f"rédige seulement les textes." if score_connu else "")
     morceaux = []
     if req.sucres_g is not None:
         morceaux.append(f"{req.sucres_g} g de sucres")
@@ -2258,7 +2365,7 @@ Réponds UNIQUEMENT en JSON valide (sans backticks, sans markdown) :
 {{"score": 85, "verdict": "Excellent choix", "commentaire": "Deux phrases sur l'intérêt nutritionnel de cet aliment.", "conseils": ["Conseil 1", "Conseil 2"]}}
 
 Le score va de 0 à 100. Un aliment brut peu transformé et riche en
-micronutriments mérite une note élevée même s'il est calorique."""
+micronutriments mérite une note élevée même s'il est calorique.{consigne_score}{consigne_textes}"""
 
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -2270,7 +2377,8 @@ micronutriments mérite une note élevée même s'il est calorique."""
         print(f"[score-aliment] Claude indisponible : {e}")
         raise HTTPException(status_code=502, detail="Notation indisponible")
 
-    resultat["score"] = _to_int(resultat.get("score"))
+    # Un score déjà en cache fait foi : le second appel ne servait qu'aux textes.
+    resultat["score"] = score_connu or _to_int(resultat.get("score"))
     resultat["verdict"] = str(resultat.get("verdict", "")).strip()
     resultat["commentaire"] = str(resultat.get("commentaire", "")).strip()
     resultat["conseils"] = [str(c).strip() for c in (resultat.get("conseils") or []) if str(c).strip()]
@@ -2282,17 +2390,17 @@ micronutriments mérite une note élevée même s'il est calorique."""
     if engine:
         session = Session()
         try:
-            session.merge(ScoreAliment(
-                source_code=req.source_code,
-                nom=req.nom,
-                score=resultat["score"],
-                verdict=resultat["verdict"],
-                commentaire=resultat["commentaire"],
-                conseils=json.dumps(resultat["conseils"], ensure_ascii=False),
-                nombre_demandes=1,
-            ))
+            connu = session.query(ScoreAliment).filter(
+                ScoreAliment.source_code == req.source_code).first()
+            if connu is None:
+                connu = ScoreAliment(source_code=req.source_code, nom=req.nom,
+                                     score=resultat["score"], nombre_demandes=1)
+                session.add(connu)
+            elif force:
+                connu.score = resultat["score"]
+            _ecrire_textes_score(connu, langue, resultat)
             session.commit()
-            print(f"[score-aliment] mémorisé : {req.nom} = {resultat['score']}")
+            print(f"[score-aliment] mémorisé ({langue}) : {req.nom} = {resultat['score']}")
         except Exception as e:
             session.rollback()
             print(f"[score-aliment] écriture impossible : {e}")
@@ -2937,6 +3045,7 @@ class SuggererRepasRequest(BaseModel):
     goal: str = "équilibré"
     user_id: str = "anonymous"
     nombre_personnes: int = 1
+    langue: str = "fr"
 
 
 # --- Suggestions de repas : vitesse ---------------------------------------
@@ -2971,6 +3080,7 @@ def _cle_suggestions(req: "SuggererRepasRequest", cible: int) -> str:
         "recents": sorted(r.strip().lower() for r in req.repas_recents),
         "cat": req.categorie, "n": req.nombre_personnes, "kcal": round(cible / 100),
         "goal": req.goal, "age": req.age // 10, "gender": req.gender,
+        "langue": _langue(req.langue),
     }, ensure_ascii=False, sort_keys=True)
 
 
@@ -3080,7 +3190,7 @@ CONSIGNES
 
 Les macros, le poids et les grammages d'ingrédients portent sur le
 TOTAL pour {req.nombre_personnes} personne(s).
-
+{consigne_langue(req.langue, "le « nom » et la « description » de chaque plat et les « etapes » de la recette. EXCEPTION ABSOLUE : le « nom » de chaque entrée de « ingredients » reste en FRANÇAIS, à la façon de Ciqual (règle 7) — il sert au calcul nutritionnel, pas à la lecture.")}
 Réponds UNIQUEMENT en JSON valide, sans backticks :
 {{"propositions": [
   {{"nom": "Poêlée de poulet aux poivrons et riz",
@@ -3186,6 +3296,7 @@ class SuggererCoursesRequest(BaseModel):
     age: int = 30
     gender: str = "homme"
     goal: str = "équilibré"
+    langue: str = "fr"
 
 
 @app.post("/suggerer-courses")
@@ -3266,7 +3377,7 @@ Réponds UNIQUEMENT en JSON valide, sans backticks :
 ]}}
 
 "type" vaut "substitution" (remplace quelque chose d'acheté trop
-souvent — dis quoi dans la raison) ou "nouveaute" (comble un manque)."""
+souvent — dis quoi dans la raison) ou "nouveaute" (comble un manque).{consigne_langue(req.langue, "« nom », « quantite », « rayon » et « raison » — les rayons deviennent « Fruit & vegetables », « Meat & fish », « Dairy », « Pantry », « Drinks ». « type » reste « substitution » ou « nouveaute ».")}"""
 
     try:
         client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
@@ -3289,7 +3400,7 @@ souvent — dis quoi dans la raison) ou "nouveaute" (comble un manque)."""
         articles.append({
             "nom": nom,
             "quantite": str(a.get("quantite") or "").strip(),
-            "rayon": str(a.get("rayon") or "Épicerie").strip(),
+            "rayon": str(a.get("rayon") or ("Pantry" if _langue(req.langue) == "en" else "Épicerie")).strip(),
             "raison": str(a.get("raison") or "").strip(),
             "type": "substitution" if str(a.get("type") or "").startswith("sub") else "nouveaute",
         })
