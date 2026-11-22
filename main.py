@@ -1366,11 +1366,16 @@ async def definir_portions_ciqual(req: LotPortionsRequete, x_admin_secret: str =
         db.close()
 
 @app.get("/admin/liste-aliments")
-async def liste_aliments(table: str = "generiques", limite: int = 500,
+async def liste_aliments(table: str = "generiques", limite: int = 5000, q: str = "",
                          x_admin_secret: str = Header(default="")):
     """Même contenu que l'export CSV, en JSON, pour l'écran Administration
     de l'app. Génériques : valeurs POUR 100 g + portion usuelle. Plats :
-    valeurs de la portion analysée."""
+    valeurs de la portion analysée.
+
+    `limite` est passée de 500 à 5 000 : triée par nom, la liste coupait
+    tout ce qui venait après la 500e entrée (« radish » n'apparaissait
+    jamais). `q` filtre par nom côté serveur, sans tenir compte de la casse.
+    """
     attendu = os.environ.get("ADMIN_SECRET", "")
     if not attendu or x_admin_secret != attendu:
         raise HTTPException(status_code=403, detail="Accès refusé")
@@ -1378,8 +1383,12 @@ async def liste_aliments(table: str = "generiques", limite: int = 500,
         raise HTTPException(status_code=503, detail="Base indisponible")
     db = Session()
     try:
+        filtre = f"%{q.strip()}%" if q.strip() else None
         if table == "produits":
-            lignes = db.query(ProduitPartage).order_by(ProduitPartage.nom).limit(limite).all()
+            req_ = db.query(ProduitPartage)
+            if filtre:
+                req_ = req_.filter(ProduitPartage.nom.ilike(filtre))
+            lignes = req_.order_by(ProduitPartage.nom).limit(limite).all()
             return {"table": "produits", "aliments": [dict(_produit_vers_dict(p), valide=bool(p.valide))
                                                       for p in lignes]}
         if table == "plats":
@@ -1389,7 +1398,10 @@ async def liste_aliments(table: str = "generiques", limite: int = 500,
                 "glucides_g": p.glucides_g, "lipides_g": p.lipides_g,
                 "sucres_g": p.sucres_g, "ag_satures_g": p.ag_satures_g, "fibres_g": p.fibres_g,
                 "score": p.score, "utilisations": p.nombre_utilisations} for p in lignes]}
-        lignes = db.query(AlimentGenerique).order_by(AlimentGenerique.nom).limit(limite).all()
+        req_ = db.query(AlimentGenerique)
+        if filtre:
+            req_ = req_.filter(AlimentGenerique.nom.ilike(filtre))
+        lignes = req_.order_by(AlimentGenerique.nom).limit(limite).all()
         return {"table": "generiques", "aliments": [{
             "nom": a.nom, "calories": a.calories, "proteines_g": a.proteines_g,
             "glucides_g": a.glucides_g, "lipides_g": a.lipides_g,
@@ -2442,6 +2454,37 @@ def normaliser_nom(texte: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+# Mots qui autorisent une fiche quasi sans calories : eau, thé, café,
+# bouillon, boissons « zéro ». Tout autre aliment sous 10 kcal/100 g est
+# une estimation ratée (un radis cru fait 13 kcal, pas 1).
+_MOTS_SANS_CALORIES = ("eau", "water", "thé", "the ", "tea", "café", "cafe", "coffee",
+                       "bouillon", "broth", "infusion", "tisane", "herbal", "light",
+                       "zéro", "zero", "diet", "vinaigre", "vinegar", "soda", "cola")
+
+
+def _generique_plausible(p: dict) -> tuple[bool, str]:
+    """Une estimation IA n'entre dans la base commune que si elle tient
+    debout : calories en accord avec les macros (4 P + 4 G + 9 L, ±35 %),
+    sous-nutriments bornés par leur famille, et pas de « 1 kcal » pour un
+    aliment qui n'est ni de l'eau ni une boisson light. Sinon elle est
+    renvoyée à l'utilisateur comme incertaine, sans être mémorisée — une
+    fiche fausse en cache se propage à tous les utilisateurs."""
+    kcal = p["calories"]
+    atwater = 4 * p["proteines_g"] + 4 * p["glucides_g"] + 9 * p["lipides_g"]
+    nom = p["nom"].lower()
+    if kcal < 10 and not any(m in nom for m in _MOTS_SANS_CALORIES):
+        return False, f"{kcal} kcal/100 g pour un aliment qui n'est pas une boisson sans calories"
+    if kcal >= 10 and atwater > 0:
+        ecart = abs(kcal - atwater) / max(kcal, atwater)
+        if ecart > 0.35:
+            return False, f"calories {kcal} incohérentes avec les macros ({atwater} kcal calculées)"
+    if p["sucres_g"] > p["glucides_g"] + 1:
+        return False, "sucres supérieurs aux glucides"
+    if p["ag_satures_g"] > p["lipides_g"] + 1:
+        return False, "saturés supérieurs aux lipides"
+    return True, ""
+
+
 @app.post("/aliment-generique")
 async def aliment_generique(req: AlimentGeneriqueRequest, force: bool = False):
     """Valeurs nutritionnelles d'un aliment nommé, POUR 100 G.
@@ -2491,11 +2534,15 @@ async def aliment_generique(req: AlimentGeneriqueRequest, force: bool = False):
 
     # ---- 2. Claude ------------------------------------------------------
     try:
-        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        client = anthropic.AsyncAnthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
         prompt = f"""Donne les valeurs nutritionnelles de cet aliment ou plat,
 POUR 100 GRAMMES.
 
 Aliment : {nom}
+
+Le nom peut être écrit dans n'importe quelle langue (« radish », « Radis »,
+« Rettich ») : identifie l'aliment et renvoie son nom dans la langue de
+la saisie, correctement orthographié.
 
 Il peut s'agir d'un produit de marque (Big Mac, Nutella), d'un plat
 composé (bo bun au porc, poulet basquaise), ou d'une préparation
@@ -2518,7 +2565,7 @@ Règles :
 - Si le nom ne désigne aucun aliment identifiable, renvoie
   {{"calories": 0}} : mieux vaut ne rien proposer qu'inventer."""
 
-        response = client.messages.create(
+        response = await client.messages.create(
             model="claude-sonnet-4-5",
             max_tokens=800,
             messages=[{"role": "user", "content": prompt}],
@@ -2547,7 +2594,13 @@ Règles :
         print(f"[aliment-generique] « {nom} » non identifié")
         raise HTTPException(status_code=404, detail="Aliment non identifié")
 
-    # ---- 3. Mémoriser pour tout le monde --------------------------------
+    # ---- 3. Vraisemblance : ne pas mettre en cache une estimation ratée --
+    plausible, raison = _generique_plausible(propre)
+    if not plausible:
+        print(f"[aliment-generique] « {propre['nom']} » NON mémorisé : {raison}")
+        return {**propre, "cache": False, "incertain": True, "raison": raison}
+
+    # ---- 4. Mémoriser pour tout le monde --------------------------------
     if engine:
         session = Session()
         try:
